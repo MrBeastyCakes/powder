@@ -41,7 +41,7 @@ jobs:
           # A test signing key, so the APK installs by sideloading. Not for a store.
           export CARGO_APK_RELEASE_KEYSTORE="$HOME/.android/debug.keystore"
           export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
-          cargo apk build -p pt-app --release
+          cargo apk build -p pt-app --lib --release
           find target -name "*.apk" -path "*release*"
           cp target/release/apk/powder-toy-next.apk powder-toy-next.apk
       - uses: actions/upload-artifact@v4

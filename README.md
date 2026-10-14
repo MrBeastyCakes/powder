@@ -1,6 +1,6 @@
 # Powder Toy Next: Phase 0
 
-A mobile-first, GPU-simulated falling-sand sandbox. Phase 0 builds two
+An Android-native, GPU-simulated falling-sand sandbox. Phase 0 builds two
 prototypes on one shared material system, a 2D world at the phone's native
 resolution (one cell per screen pixel) and a 3D voxel world, so the direction
 for every later phase can be chosen from measurements and playtests.
@@ -15,7 +15,7 @@ for every later phase can be chosen from measurements and playtests.
 | `crates/pt-sim3d` | The 3D voxel simulation, brush picking and ray-marched renderer |
 | `crates/pt-app` | The touch app: both prototypes behind one UI, with an on-device benchmark |
 | `crates/pt-bench` | The standard benchmark and a screenshot tool, runnable headless |
-| `mobile/android`, `mobile/ios` | Packaging for phones; see the README in each |
+| `mobile/android` | Android packaging (native Rust NativeActivity, Vulkan); see its README |
 
 ## How the simulation works
 
@@ -39,7 +39,8 @@ for every later phase can be chosen from measurements and playtests.
 
 ## Run it
 
-Desktop (Vulkan, Metal or DX12):
+Android is the target (see `mobile/android/README.md`). For development the
+same app also runs in a desktop window:
 
 ```sh
 cargo run --release -p pt-app
@@ -77,11 +78,11 @@ Done:
 - Touch app with material bar, heat and cool tools, temperature view, pause and
   step, 2D and 3D switch, world size picker and on-device benchmark
 - 21 tests (7 material, 9 2D, 5 3D) passing on a software GPU
-- Android and iOS targets type-check; packaging set up
+- Android target type-checks; APK packaging set up with cargo-apk
 
 Next:
 
-- First APK and iOS build on real hardware, then benchmarks on three phone tiers
+- First APK build on real hardware, then benchmarks on three Android phone tiers
 - Sleeping chunks (skip regions where nothing moves), the biggest expected speedup
 - Empty-space skipping for the 3D ray march
 - Magnifier loupe for 1-pixel precision under a finger

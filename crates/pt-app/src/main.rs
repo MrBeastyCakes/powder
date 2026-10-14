@@ -1,4 +1,4 @@
-//! Desktop and iOS entry point. Android loads the library and starts in
+//! Desktop development entry point. Android loads the library and starts in
 //! `android_main` instead, so this binary is empty there.
 
 #[cfg(not(target_os = "android"))]

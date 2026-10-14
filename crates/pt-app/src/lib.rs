@@ -1,7 +1,7 @@
 //! Powder Toy Next, Phase 0 app: the 2D and 3D prototypes behind one touch UI.
 //!
-//! The same code runs on Android (`android_main`), iOS and desktop (`run`
-//! from `main.rs`). The world is created at the screen's native resolution,
+//! The target is Android (`android_main`, a Rust NativeActivity). The same
+//! code also runs as a desktop window (`run` from `main.rs`) for development. The world is created at the screen's native resolution,
 //! one cell per pixel, the first time a window appears.
 
 use std::sync::Arc;
@@ -147,16 +147,6 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
         .build()
         .expect("create event loop");
     run(event_loop);
-}
-
-/// iOS entry point, called from `main.m` in the Xcode project. Never returns:
-/// winit hands the thread to UIKit.
-#[cfg(target_os = "ios")]
-#[unsafe(no_mangle)]
-pub extern "C" fn powder_toy_main() {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"))
-        .try_init();
-    run(EventLoop::new().expect("create event loop"));
 }
 
 fn surface_config(surface: &wgpu::Surface<'_>, gpu: &Gpu, size: [u32; 2]) -> wgpu::SurfaceConfiguration {

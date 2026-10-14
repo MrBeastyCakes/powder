@@ -23,13 +23,12 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  mobile:
+  android:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, aarch64-apple-ios
+          targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p pt-app --target aarch64-linux-android
-      - run: cargo check -p pt-app --target aarch64-apple-ios

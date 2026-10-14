@@ -19,8 +19,8 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// The backends the app runs on: Vulkan (Android, Linux, Windows) and
-    /// Metal (iOS, macOS). Simulation shaders need storage buffers in compute
+    /// The backends the app runs on: Vulkan on Android, plus whatever a
+    /// development desktop has. Simulation shaders need storage buffers in compute
     /// and fragment stages, which the GL backend cannot promise on phones.
     pub fn backends() -> wgpu::Backends {
         wgpu::Backends::VULKAN | wgpu::Backends::METAL | wgpu::Backends::DX12

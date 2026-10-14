@@ -7,9 +7,8 @@ license.workspace = true
 
 [lib]
 name = "pt_app"
-# cdylib is what Android loads, staticlib is what the iOS Xcode project links,
-# and the rlib feeds the desktop binary.
-crate-type = ["rlib", "cdylib", "staticlib"]
+# cdylib is what Android loads; the rlib feeds the desktop dev binary.
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "powder-toy"

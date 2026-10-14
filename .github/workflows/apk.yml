@@ -38,6 +38,9 @@ jobs:
         run: |
           export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          # A test signing key, so the APK installs by sideloading. Not for a store.
+          export CARGO_APK_RELEASE_KEYSTORE="$HOME/.android/debug.keystore"
+          export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
           cargo apk build -p pt-app --release
           find target -name "*.apk" -path "*release*"
           cp target/release/apk/powder-toy-next.apk powder-toy-next.apk

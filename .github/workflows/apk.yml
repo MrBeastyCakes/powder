@@ -1,0 +1,59 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+      - name: Debug signing key
+        # cargo-apk signs with the standard Android debug key. A fixed key
+        # lets each new build install over the last one.
+        run: |
+          mkdir -p ~/.android
+          keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android \
+            -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+      - name: Build APK
+        run: |
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          # A test signing key, so the APK installs by sideloading. Not for a store.
+          export CARGO_APK_RELEASE_KEYSTORE="$HOME/.android/debug.keystore"
+          export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
+          cargo apk build -p pt-app --lib --release
+          find target -name "*.apk" -path "*release*"
+          cp target/release/apk/powder-toy-next.apk powder-toy-next.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powder-toy-next-apk
+          path: powder-toy-next.apk
+      - name: Publish as the "latest-apk" release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest-apk --cleanup-tag --yes || true
+          gh release create latest-apk powder-toy-next.apk --prerelease --target "$GITHUB_SHA" \
+            --title "Latest APK" \
+            --notes "Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}. Open this page on your Android phone and tap powder-toy-next.apk to install (allow installs from your browser when asked)."

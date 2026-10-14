@@ -181,13 +181,20 @@ pub enum MaterialError {
     #[error("material `{0}`: only the first material may be empty")]
     ExtraEmpty(String),
     #[error("material `{material}`: {field} refers to unknown material `{target}`")]
-    UnknownTarget { material: String, field: &'static str, target: String },
+    UnknownTarget {
+        material: String,
+        field: &'static str,
+        target: String,
+    },
     #[error("material `{material}`: {problem}")]
     Invalid { material: String, problem: String },
 }
 
 fn invalid(material: &str, problem: impl Into<String>) -> MaterialError {
-    MaterialError::Invalid { material: material.to_string(), problem: problem.into() }
+    MaterialError::Invalid {
+        material: material.to_string(),
+        problem: problem.into(),
+    }
 }
 
 /// A validated, compiled material pack.
@@ -208,7 +215,10 @@ impl MaterialTable {
     pub fn from_toml(src: &str) -> Result<MaterialTable, MaterialError> {
         let file: PackFile = toml::from_str(src)?;
         if file.schema_version != SCHEMA_VERSION {
-            return Err(MaterialError::Schema { found: file.schema_version, expected: SCHEMA_VERSION });
+            return Err(MaterialError::Schema {
+                found: file.schema_version,
+                expected: SCHEMA_VERSION,
+            });
         }
         MaterialTable::compile(file.pack, file.materials)
     }
@@ -283,13 +293,19 @@ impl MaterialTable {
                 let other = &defs[gpu[target].down_into as usize].id;
                 return Err(invalid(
                     &defs[target].id,
-                    format!("both `{other}` and `{}` heat into it; a material can only cool back into one", def.id),
+                    format!(
+                        "both `{other}` and `{}` heat into it; a material can only cool back into one",
+                        def.id
+                    ),
                 ));
             }
             if gpu[target].up_temp <= h.at {
                 return Err(invalid(
                     &defs[target].id,
-                    format!("it heats into something at {} but forms from `{}` at {}; the first must be higher", gpu[target].up_temp, def.id, h.at),
+                    format!(
+                        "it heats into something at {} but forms from `{}` at {}; the first must be higher",
+                        gpu[target].up_temp, def.id, h.at
+                    ),
                 ));
             }
             gpu[target].down_into = i as u32;
@@ -315,7 +331,8 @@ impl MaterialTable {
 
     /// Like [`id`](Self::id), for materials the caller knows exist.
     pub fn expect_id(&self, name: &str) -> u32 {
-        self.id(name).unwrap_or_else(|| panic!("material `{name}` is not in pack `{}`", self.pack))
+        self.id(name)
+            .unwrap_or_else(|| panic!("material `{name}` is not in pack `{}`", self.pack))
     }
 
     pub fn def(&self, id: u32) -> &MaterialDef {
@@ -437,7 +454,8 @@ mod tests {
 
     #[test]
     fn rejects_unknown_target() {
-        let src = with(r##"
+        let src = with(
+            r##"
             [[material]]
             id = "a"
             name = "A"
@@ -447,7 +465,8 @@ mod tests {
             heat_capacity = 1
             conductivity = 1
             heats_into = { into = "nope", at = 10, latent = 1 }
-        "##);
+        "##,
+        );
         assert!(matches!(MaterialTable::from_toml(&src), Err(MaterialError::UnknownTarget { .. })));
     }
 

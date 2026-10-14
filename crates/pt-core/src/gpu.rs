@@ -62,7 +62,12 @@ impl Gpu {
                 ..Default::default()
             })
             .await?;
-        Ok(Gpu { instance, adapter, device, queue })
+        Ok(Gpu {
+            instance,
+            adapter,
+            device,
+            queue,
+        })
     }
 
     pub fn adapter_name(&self) -> String {
@@ -72,7 +77,9 @@ impl Gpu {
 
     /// Blocks until all submitted work has finished.
     pub fn wait(&self) {
-        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("GPU device lost while waiting");
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("GPU device lost while waiting");
     }
 
     /// Copies a buffer back to the CPU. Slow; for tests and the inspect tool.

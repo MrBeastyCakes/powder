@@ -39,7 +39,11 @@ pub fn bench_2d(gpu: &Gpu, table: &MaterialTable, width: u32, height: u32, ticks
     let start = Instant::now();
     sim.run(gpu, ticks);
     let ms = start.elapsed().as_secs_f64() * 1000.0 / ticks as f64;
-    BenchResult { label: format!("2D {width} x {height}"), cells: sim.cell_count(), ms_per_tick: ms }
+    BenchResult {
+        label: format!("2D {width} x {height}"),
+        cells: sim.cell_count(),
+        ms_per_tick: ms,
+    }
 }
 
 /// Times `ticks` ticks of the 3D bench scene in an `n`-cubed world. Returns
@@ -56,12 +60,17 @@ pub fn bench_3d(gpu: &Gpu, table: &MaterialTable, n: u32, ticks: u32) -> Option<
     let start = Instant::now();
     sim.run(gpu, ticks);
     let ms = start.elapsed().as_secs_f64() * 1000.0 / ticks as f64;
-    Some(BenchResult { label: format!("3D {n}^3"), cells: sim.cell_count(), ms_per_tick: ms })
+    Some(BenchResult {
+        label: format!("3D {n}^3"),
+        cells: sim.cell_count(),
+        ms_per_tick: ms,
+    })
 }
 
 /// Formats results as a Markdown table.
 pub fn table(gpu_name: &str, results: &[BenchResult]) -> String {
-    let mut out = format!("GPU: {gpu_name}\n\n| World | Cells | ms per tick | Ticks per second | Sim fits 60 fps |\n|---|---:|---:|---:|---|\n");
+    let mut out =
+        format!("GPU: {gpu_name}\n\n| World | Cells | ms per tick | Ticks per second | Sim fits 60 fps |\n|---|---:|---:|---:|---|\n");
     for r in results {
         out += &format!(
             "| {} | {:.2} M | {:.2} | {:.0} | {} |\n",

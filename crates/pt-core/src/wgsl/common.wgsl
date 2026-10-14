@@ -79,7 +79,9 @@ fn heavier(a: u32, b: u32) -> bool {
 fn sink_chance(a: u32, b: u32) -> f32 {
     let da = materials.m[a].density;
     let db = materials.m[b].density;
-    return clamp(2.0 * (da - db) / da, 0.05, 1.0);
+    // Capped below 1 so a falling mass breaks up naturally instead of
+    // separating into regular rows.
+    return clamp(2.0 * (da - db) / da, 0.05, 0.9);
 }
 
 // Heat flow per degree of difference between two neighbouring cells. Symmetric

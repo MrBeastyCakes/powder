@@ -22,7 +22,12 @@ struct World {
 
 impl World {
     fn new(w: u32, h: u32) -> World {
-        World { w, h, cells: vec![0; (w * h) as usize], temps: vec![20.0; (w * h) as usize] }
+        World {
+            w,
+            h,
+            cells: vec![0; (w * h) as usize],
+            temps: vec![20.0; (w * h) as usize],
+        }
     }
     fn fill(&mut self, x0: u32, y0: u32, x1: u32, y1: u32, mat: u32, temp: f32) {
         for y in y0..y1 {
@@ -88,10 +93,20 @@ fn liquids_layer_by_density() {
     sim.run(&gpu, 1500);
     let cells = sim.read_cells(&gpu);
     let mean_row = |mat: u32| {
-        let rows: Vec<usize> = cells.iter().enumerate().filter(|(_, &c)| c & 0xff == mat).map(|(i, _)| i / 32).collect();
+        let rows: Vec<usize> = cells
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c & 0xff == mat)
+            .map(|(i, _)| i / 32)
+            .collect();
         rows.iter().sum::<usize>() as f32 / rows.len() as f32
     };
-    assert!(mean_row(oil) < mean_row(water), "oil ({}) should sit above water ({})", mean_row(oil), mean_row(water));
+    assert!(
+        mean_row(oil) < mean_row(water),
+        "oil ({}) should sit above water ({})",
+        mean_row(oil),
+        mean_row(water)
+    );
 }
 
 #[test]
@@ -150,7 +165,11 @@ fn melting_ice_cools_water_and_conserves_energy() {
     let therm = sim.read_therm(&gpu);
     let energy_after = ice_water_energy(&t, &cells, &therm);
     let drift = ((energy_after - energy_before) / energy_before).abs();
-    assert!(drift < 1e-3, "energy drifted by {:.4}% ({energy_before} -> {energy_after})", drift * 100.0);
+    assert!(
+        drift < 1e-3,
+        "energy drifted by {:.4}% ({energy_before} -> {energy_after})",
+        drift * 100.0
+    );
     assert!(count(&cells, ice) < 256, "some ice should have melted");
     let corner_temp = therm[0][0];
     assert!(corner_temp < 40.0, "the water should have cooled, corner is {corner_temp}");
@@ -165,7 +184,12 @@ fn water_boils_and_steam_rises() {
     w.fill(0, 40, 32, 48, water, 98.0);
     let mut sim = w.sim(&gpu, &t, 4);
     for _ in 0..60 {
-        sim.stroke(Stroke { from: [0.0, 46.0], to: [32.0, 46.0], radius: 3.0, tool: Tool::Heat });
+        sim.stroke(Stroke {
+            from: [0.0, 46.0],
+            to: [32.0, 46.0],
+            radius: 3.0,
+            tool: Tool::Heat,
+        });
         sim.run(&gpu, 2);
     }
     sim.run(&gpu, 60);
@@ -203,7 +227,11 @@ fn fire_spreads_through_wood() {
     let mut sim = w.sim(&gpu, &t, 5);
     sim.run(&gpu, 900);
     let cells = sim.read_cells(&gpu);
-    assert!(count(&cells, wood) < before - 30, "wood should burn ({} of {before} left)", count(&cells, wood));
+    assert!(
+        count(&cells, wood) < before - 30,
+        "wood should burn ({} of {before} left)",
+        count(&cells, wood)
+    );
 }
 
 #[test]
@@ -212,13 +240,22 @@ fn paint_and_erase() {
     let t = MaterialTable::core();
     let wall = t.expect_id("wall");
     let mut sim = Sim2d::new(&gpu, t.clone(), 64, 64, 1);
-    sim.stroke(Stroke { from: [10.0, 10.0], to: [50.0, 10.0], radius: 2.0, tool: Tool::Paint(wall) });
+    sim.stroke(Stroke {
+        from: [10.0, 10.0],
+        to: [50.0, 10.0],
+        radius: 2.0,
+        tool: Tool::Paint(wall),
+    });
     sim.run(&gpu, 0);
     let n = count(&sim.read_cells(&gpu), wall);
     assert!(n > 120 && n < 220, "a 40 x 4 capsule of wall, got {n}");
-    sim.stroke(Stroke { from: [0.0, 10.0], to: [64.0, 10.0], radius: 3.0, tool: Tool::Erase });
+    sim.stroke(Stroke {
+        from: [0.0, 10.0],
+        to: [64.0, 10.0],
+        radius: 3.0,
+        tool: Tool::Erase,
+    });
     sim.run(&gpu, 0);
     assert_eq!(count(&sim.read_cells(&gpu), wall), 0);
     assert_eq!(sim.inspect(&gpu, 30, 10).map(|c| c.0), Some(0));
 }
-

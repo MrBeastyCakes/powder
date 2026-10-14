@@ -48,7 +48,10 @@ fn sand_falls_and_piles_in_3d() {
         .filter(|&(x, y, z)| out[sim.index(x, y, z)] & 0xff == sand)
         .count();
     assert_eq!(upper, 0, "all sand should have fallen into the lower half");
-    let floor: usize = (0..32u32).flat_map(|z| (0..32u32).map(move |x| (x, z))).filter(|&(x, z)| out[sim.index(x, 0, z)] & 0xff == sand).count();
+    let floor: usize = (0..32u32)
+        .flat_map(|z| (0..32u32).map(move |x| (x, z)))
+        .filter(|&(x, z)| out[sim.index(x, 0, z)] & 0xff == sand)
+        .count();
     assert!(floor > 64, "the pile should spread wider than its 8 x 8 start, floor has {floor}");
 }
 
@@ -121,7 +124,13 @@ fn brush_paints_on_surfaces_and_planes() {
     sim.upload(&gpu, &cells, &temps);
 
     // Straight down from above the middle: lands on top of the slab.
-    let down = Stroke3 { origin: Vec3::new(16.5, 100.0, 16.5), dir: Vec3::NEG_Y, radius: 2.0, tool: Tool::Replace(sand), target: Target::Surface };
+    let down = Stroke3 {
+        origin: Vec3::new(16.5, 100.0, 16.5),
+        dir: Vec3::NEG_Y,
+        radius: 2.0,
+        tool: Tool::Replace(sand),
+        target: Target::Surface,
+    };
     sim.stroke(down);
     sim.run(&gpu, 0);
     let hit = sim.read_pick(&gpu).expect("the ray should hit the slab");
@@ -129,7 +138,10 @@ fn brush_paints_on_surfaces_and_planes() {
     assert!(count(&sim.read_cells(&gpu), sand) > 0);
 
     sim.plane_y = 20.0;
-    sim.stroke(Stroke3 { target: Target::Plane, ..down });
+    sim.stroke(Stroke3 {
+        target: Target::Plane,
+        ..down
+    });
     sim.run(&gpu, 0);
     let hit = sim.read_pick(&gpu).expect("the ray should cross the plane");
     assert!((hit.y - 20.5).abs() < 0.01, "plane hit at {hit}");

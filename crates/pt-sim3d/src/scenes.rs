@@ -17,7 +17,15 @@ struct Builder<'a> {
 impl<'a> Builder<'a> {
     fn new(table: &'a MaterialTable, dims: [u32; 3], seed: u64) -> Self {
         let n = dims.iter().map(|&d| d as usize).product();
-        Builder { dims, table, scene: Scene { cells: vec![0; n], temps: vec![20.0; n] }, rng: seed | 1 }
+        Builder {
+            dims,
+            table,
+            scene: Scene {
+                cells: vec![0; n],
+                temps: vec![20.0; n],
+            },
+            rng: seed | 1,
+        }
     }
 
     fn rand(&mut self) -> u32 {

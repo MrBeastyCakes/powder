@@ -90,7 +90,12 @@ impl Sim2d {
         let cell_count = (width as u64) * (height as u64);
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         let make = |label: &str, bytes: u64| {
-            device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes, usage: storage, mapped_at_creation: false })
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: bytes,
+                usage: storage,
+                mapped_at_creation: false,
+            })
         };
         let cells = [make("cells a", cell_count * 4), make("cells b", cell_count * 4)];
         let therm = [make("therm a", cell_count * 8), make("therm b", cell_count * 8)];
@@ -274,7 +279,10 @@ impl Sim2d {
         let cells_y = self.height.div_ceil(8);
         let blocks_x = (self.width / 2 + 1).div_ceil(8);
         let blocks_y = (self.height / 2 + 1).div_ceil(8);
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("sim2d"), timestamp_writes: None });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("sim2d"),
+            timestamp_writes: None,
+        });
         let mut slot = 0u32;
         for _ in 0..ticks {
             let group = &self.step_groups[self.current];
@@ -323,7 +331,10 @@ impl Sim2d {
         queue.write_buffer(&self.brush, 0, bytemuck::bytes_of(&uniform));
         let w = (max_x - min_x + 1) as u32;
         let h = (max_y - min_y + 1) as u32;
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("paint2d"), timestamp_writes: None });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("paint2d"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.paint_pipe);
         pass.set_bind_group(0, &self.paint_groups[self.current], &[]);
         pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
@@ -361,7 +372,7 @@ impl Sim2d {
         if x >= self.width || y >= self.height {
             return None;
         }
-        let i = (y as u64 * self.width as u64 + x as u64) as u64;
+        let i = y as u64 * self.width as u64 + x as u64;
         let cell: Vec<u32> = gpu.read_buffer(&self.cells[self.current], i * 4, 1);
         let th: Vec<[f32; 2]> = gpu.read_buffer(&self.therm[self.current], i * 8, 1);
         Some((cell[0] & 0xff, th[0][0], th[0][1]))
@@ -453,7 +464,12 @@ impl Renderer2d {
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("render2d"),
             layout: Some(&pl),
-            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
@@ -494,7 +510,10 @@ impl Renderer2d {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,

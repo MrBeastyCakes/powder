@@ -12,6 +12,7 @@ rust-version = "1.85"
 pt-core = { path = "crates/pt-core" }
 pt-sim2d = { path = "crates/pt-sim2d" }
 pt-sim3d = { path = "crates/pt-sim3d" }
+pt-bench = { path = "crates/pt-bench" }
 wgpu = "30.0.1"
 winit = "0.30.13"
 egui = "0.36.2"

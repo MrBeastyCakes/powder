@@ -44,7 +44,11 @@ fn parse_args() -> Result<Args, String> {
                     .collect::<Result<_, String>>()?
             }
             "--3d" => {
-                args.sizes_3d = value()?.split(',').filter(|s| !s.is_empty()).map(|s| s.parse().map_err(|e| format!("--3d: {e}"))).collect::<Result<_, _>>()?
+                args.sizes_3d = value()?
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.parse().map_err(|e| format!("--3d: {e}")))
+                    .collect::<Result<_, _>>()?
             }
             "--screenshots" => args.screenshots = Some(PathBuf::from(value()?)),
             "-h" | "--help" => {
@@ -98,7 +102,11 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 fn target(gpu: &Gpu, w: u32, h: u32) -> wgpu::Texture {
     gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("screenshot"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -120,7 +128,14 @@ fn save(gpu: &Gpu, texture: &wgpu::Texture, path: &Path) {
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(h),
+            },
+        },
         texture.size(),
     );
     gpu.queue.submit([encoder.finish()]);
@@ -134,7 +149,10 @@ fn save(gpu: &Gpu, texture: &wgpu::Texture, path: &Path) {
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.write_header().and_then(|mut wr| wr.write_image_data(&pixels)).expect("write png");
+    encoder
+        .write_header()
+        .and_then(|mut wr| wr.write_image_data(&pixels))
+        .expect("write png");
     println!("wrote {}", path.display());
 }
 
@@ -172,7 +190,19 @@ fn screenshots(gpu: &Gpu, table: &MaterialTable, dir: &Path) {
     for (ticks, name) in [(0, "3d-start"), (200, "3d-later")] {
         sim.run(gpu, ticks);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        renderer.draw(&gpu.queue, &mut encoder, &view, [w, h], &sim, &camera, View3d { show_plane: name == "3d-start", brush_radius: 4.0, temperature: false });
+        renderer.draw(
+            &gpu.queue,
+            &mut encoder,
+            &view,
+            [w, h],
+            &sim,
+            &camera,
+            View3d {
+                show_plane: name == "3d-start",
+                brush_radius: 4.0,
+                temperature: false,
+            },
+        );
         gpu.queue.submit([encoder.finish()]);
         save(gpu, &tex, &dir.join(format!("{name}.png")));
     }

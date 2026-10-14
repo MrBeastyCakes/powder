@@ -1,0 +1,41 @@
+name: PowderToy
+options:
+  bundleIdPrefix: app.powdertoy
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  PowderToy:
+    type: application
+    platform: iOS
+    sources:
+      - PowderToy
+    info:
+      path: PowderToy/Info.plist
+      properties:
+        CFBundleDisplayName: Powder Toy Next
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIApplicationSupportsIndirectInputEvents: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.powdertoy.next
+        LIBRARY_SEARCH_PATHS: "$(PROJECT_DIR)/../../target/$(RUST_TARGET)/release"
+        OTHER_LDFLAGS: "-lpt_app -lc++"
+        RUST_TARGET: aarch64-apple-ios
+      configs:
+        Debug:
+          "RUST_TARGET[sdk=iphonesimulator*]": aarch64-apple-ios-sim
+        Release:
+          "RUST_TARGET[sdk=iphonesimulator*]": aarch64-apple-ios-sim
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: UIKit.framework
+      - sdk: CoreGraphics.framework
+      - sdk: Foundation.framework
+    preBuildScripts:
+      - name: Build Rust
+        script: '"$PROJECT_DIR/build-rust.sh"'
+        basedOnDependencyAnalysis: false

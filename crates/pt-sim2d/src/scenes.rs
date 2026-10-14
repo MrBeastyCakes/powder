@@ -34,7 +34,16 @@ struct Painter<'a> {
 impl<'a> Painter<'a> {
     fn new(table: &'a MaterialTable, w: u32, h: u32, seed: u64) -> Self {
         let n = (w * h) as usize;
-        Painter { w, h, table, scene: Scene { cells: vec![0; n], temps: vec![20.0; n] }, rng: Rng(seed | 1) }
+        Painter {
+            w,
+            h,
+            table,
+            scene: Scene {
+                cells: vec![0; n],
+                temps: vec![20.0; n],
+            },
+            rng: Rng(seed | 1),
+        }
     }
 
     fn set(&mut self, x: u32, y: u32, name: &str) {

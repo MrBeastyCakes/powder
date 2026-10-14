@@ -107,7 +107,7 @@ impl Sim3d {
     pub fn fits(gpu: &Gpu, dims: [u32; 3]) -> bool {
         let n = dims.iter().map(|&d| d as u64).product::<u64>();
         let limits = gpu.device.limits();
-        n * 8 <= limits.max_storage_buffer_binding_size as u64 && n * 8 <= limits.max_buffer_size
+        n * 8 <= limits.max_storage_buffer_binding_size && n * 8 <= limits.max_buffer_size
     }
 
     pub fn new(gpu: &Gpu, table: MaterialTable, dims: [u32; 3], seed: u32) -> Sim3d {
@@ -115,7 +115,12 @@ impl Sim3d {
         let n = dims.iter().map(|&d| d as u64).product::<u64>();
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         let make = |label: &str, bytes: u64| {
-            device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes, usage: storage, mapped_at_creation: false })
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: bytes,
+                usage: storage,
+                mapped_at_creation: false,
+            })
         };
         let cells = [make("voxels a", n * 4), make("voxels b", n * 4)];
         let therm = [make("vtherm a", n * 8), make("vtherm b", n * 8)];
@@ -294,7 +299,10 @@ impl Sim3d {
         let [nx, ny, nz] = self.dims;
         let cells = [nx.div_ceil(4), ny.div_ceil(4), nz.div_ceil(4)];
         let blocks = [(nx / 2 + 1).div_ceil(4), (ny / 2 + 1).div_ceil(4), (nz / 2 + 1).div_ceil(4)];
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("sim3d"), timestamp_writes: None });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("sim3d"),
+            timestamp_writes: None,
+        });
         let mut slot = 0u32;
         for _ in 0..ticks {
             let group = &self.step_groups[self.current];
@@ -340,7 +348,10 @@ impl Sim3d {
             _p: [0; 2],
         };
         queue.write_buffer(&self.brush, 0, bytemuck::bytes_of(&u));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("paint3d"), timestamp_writes: None });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("paint3d"),
+            timestamp_writes: None,
+        });
         pass.set_bind_group(0, &self.paint_groups[self.current], &[]);
         pass.set_pipeline(&self.pick_pipe);
         pass.dispatch_workgroups(1, 1, 1);
@@ -403,7 +414,11 @@ impl OrbitCamera {
     }
 
     pub fn eye(&self) -> Vec3 {
-        let dir = Vec3::new(self.pitch.cos() * self.yaw.sin(), self.pitch.sin(), self.pitch.cos() * self.yaw.cos());
+        let dir = Vec3::new(
+            self.pitch.cos() * self.yaw.sin(),
+            self.pitch.sin(),
+            self.pitch.cos() * self.yaw.cos(),
+        );
         self.target + dir * self.distance
     }
 
@@ -501,7 +516,12 @@ impl Renderer3d {
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("render3d"),
             layout: Some(&pl),
-            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
@@ -533,7 +553,12 @@ impl Renderer3d {
             inv_view_proj: camera.view_proj(aspect).inverse().to_cols_array_2d(),
             eye: camera.eye().extend(1.0).to_array(),
             dims: [sim.dims[0], sim.dims[1], sim.dims[2], 0],
-            extra: [sim.plane_y, view.brush_radius, view.show_plane as u32 as f32, view.temperature as u32 as f32],
+            extra: [
+                sim.plane_y,
+                view.brush_radius,
+                view.show_plane as u32 as f32,
+                view.temperature as u32 as f32,
+            ],
             viewport: [viewport[0] as f32, viewport[1] as f32, 0.0, 0.0],
         };
         queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&u));
@@ -543,7 +568,10 @@ impl Renderer3d {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,

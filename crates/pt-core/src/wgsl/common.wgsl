@@ -180,3 +180,9 @@ fn heat_map(t: f32) -> vec3<f32> {
     let y = sqrt(x);
     return clamp(vec3<f32>(1.6 * y - 0.3, 1.0 - abs(1.6 * y - 0.9) * 1.4, 1.0 - 2.2 * y), vec3<f32>(0.0), vec3<f32>(1.0));
 }
+
+// Ray directions with an exactly-zero component would divide by zero in a
+// voxel walk; nudge those components to a tiny positive value.
+fn safe_dir(d: vec3<f32>) -> vec3<f32> {
+    return select(d, vec3<f32>(1e-6), abs(d) < vec3<f32>(1e-6));
+}

@@ -19,3 +19,40 @@ pub const COMMON_WGSL: &str = include_str!("wgsl/common.wgsl");
 pub fn shader_source(sim_wgsl: &str) -> String {
     format!("{COMMON_WGSL}\n{sim_wgsl}")
 }
+
+/// What a brush does, in both prototypes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    /// Draw a material into empty cells.
+    Paint(u32),
+    /// Draw a material over anything.
+    Replace(u32),
+    Erase,
+    /// Add energy, like a blowtorch.
+    Heat,
+    /// Remove energy.
+    Cool,
+}
+
+impl Tool {
+    /// The brush shaders' mode number and material id.
+    pub fn mode_and_material(self) -> (u32, u32) {
+        match self {
+            Tool::Paint(m) => (0, m),
+            Tool::Replace(m) => (1, m),
+            Tool::Erase => (2, 0),
+            Tool::Heat => (3, 0),
+            Tool::Cool => (4, 0),
+        }
+    }
+}
+
+/// How full a fresh brush stroke of each kind is drawn: scattered grains look
+/// like poured sand, solids and liquids are drawn solid.
+pub fn fill_for(kind: Kind) -> f32 {
+    match kind {
+        Kind::Powder => 0.55,
+        Kind::Gas => 0.35,
+        _ => 1.0,
+    }
+}

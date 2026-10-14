@@ -3,7 +3,8 @@
 
 use bytemuck::{Pod, Zeroable};
 use pt_core::gpu::{compute_pipeline, layout, material_buffer, Gpu, UNIFORM_SLOT};
-use pt_core::{shader_source, Kind, MaterialTable};
+pub use pt_core::Tool;
+use pt_core::{fill_for, shader_source, MaterialTable};
 use wgpu::util::DeviceExt;
 use wgpu::ShaderStages as S;
 
@@ -47,18 +48,6 @@ struct BrushUniform {
     _p1: u32,
 }
 
-/// What a brush stroke does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tool {
-    /// Draw a material into empty cells.
-    Paint(u32),
-    /// Draw a material over anything.
-    Replace(u32),
-    Erase,
-    Heat,
-    Cool,
-}
-
 /// One brush stroke segment in world cells.
 #[derive(Debug, Clone, Copy)]
 pub struct Stroke {
@@ -66,16 +55,6 @@ pub struct Stroke {
     pub to: [f32; 2],
     pub radius: f32,
     pub tool: Tool,
-}
-
-/// How full a fresh stroke of each kind is drawn: scattered grains look like
-/// poured sand, solids and liquids are drawn solid.
-pub fn fill_for(kind: Kind) -> f32 {
-    match kind {
-        Kind::Powder => 0.55,
-        Kind::Gas => 0.35,
-        _ => 1.0,
-    }
 }
 
 pub struct Sim2d {
@@ -207,7 +186,7 @@ impl Sim2d {
             tick: 0,
             seed,
             heat_speed: 1.0,
-            move_substeps: 2,
+            move_substeps: 4,
             heat_pipe: compute_pipeline(device, &step_pl, &sim_module, "heat"),
             move_pipe: compute_pipeline(device, &step_pl, &sim_module, "move_blocks"),
             paint_pipe: compute_pipeline(device, &paint_pl, &paint_module, "paint"),
@@ -321,13 +300,7 @@ impl Sim2d {
         let min_y = (s.from[1].min(s.to[1]) - r).floor() as i32;
         let max_x = (s.from[0].max(s.to[0]) + r).ceil() as i32;
         let max_y = (s.from[1].max(s.to[1]) + r).ceil() as i32;
-        let (mode, mat) = match s.tool {
-            Tool::Paint(m) => (0, m),
-            Tool::Replace(m) => (1, m),
-            Tool::Erase => (2, 0),
-            Tool::Heat => (3, 0),
-            Tool::Cool => (4, 0),
-        };
+        let (mode, mat) = s.tool.mode_and_material();
         let def = self.table.def(mat);
         let uniform = BrushUniform {
             ax: s.from[0],

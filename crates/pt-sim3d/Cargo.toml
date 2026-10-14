@@ -1,5 +1,13 @@
 [package]
 name = "pt-sim3d"
+description = "3D voxel prototype on the GPU, sharing the 2D material core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+
 [dependencies]
+pt-core.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+log.workspace = true

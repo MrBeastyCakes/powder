@@ -1,0 +1,142 @@
+# Core material pack, schema version 1.
+#
+# Every property the simulation reads comes from this file. No material has its
+# own update code: behavior follows from kind, density, heat and the optional
+# transitions below. The built-in pack uses the same format a mod will.
+#
+# Units are "playful, built on real laws": temperatures are degrees Celsius,
+# heat_capacity is energy per cell per degree, latent heat is energy per cell,
+# and conductivity is a relative rate per tick. Ratios follow the real
+# materials; absolute values are tuned so changes are visible in seconds.
+#
+# kind:          empty | solid | powder | liquid | gas
+# heats_into:    phase change when heated past `at`. It absorbs `latent` energy
+#                on the way, and the reverse change (freezing, condensing) is
+#                derived automatically and releases the same energy.
+# burns:         turns into `into` once at or above `at` degrees while touching
+#                open space (air or a gas), adding `heat` energy. `chance` is
+#                per tick.
+# decays:        turns into `into` with `chance` per tick, keeping its
+#                temperature (the energy leaves as light).
+
+schema_version = 1
+pack = "core"
+
+# Material 0 must be the empty material: it is what the world starts as.
+[[material]]
+id = "air"
+name = "Air"
+kind = "empty"
+color = "#0b0d12"
+density = 1.2
+heat_capacity = 0.05
+conductivity = 0.02
+
+[[material]]
+id = "wall"
+name = "Wall"
+kind = "solid"
+color = "#6b6f7a"
+density = 3000
+heat_capacity = 1.0
+conductivity = 0.01
+
+[[material]]
+id = "sand"
+name = "Sand"
+kind = "powder"
+color = "#d8c07a"
+density = 1600
+heat_capacity = 1.3
+conductivity = 0.3
+friction = 0.35
+
+[[material]]
+id = "water"
+name = "Water"
+kind = "liquid"
+color = "#2f6fdc"
+density = 1000
+heat_capacity = 4.2
+conductivity = 0.6
+spread = 0.9
+heats_into = { into = "steam", at = 100, latent = 900 }
+
+[[material]]
+id = "ice"
+name = "Ice"
+kind = "solid"
+color = "#bfe6ff"
+density = 917
+heat_capacity = 2.0
+conductivity = 2.2
+spawn_temp = -20
+heats_into = { into = "water", at = 0, latent = 330 }
+
+[[material]]
+id = "steam"
+name = "Steam"
+kind = "gas"
+color = "#c9d3de"
+density = 0.6
+heat_capacity = 0.2
+conductivity = 0.05
+spread = 0.6
+spawn_temp = 120
+
+[[material]]
+id = "stone"
+name = "Stone"
+kind = "powder"
+color = "#8a8580"
+density = 2600
+heat_capacity = 2.0
+conductivity = 1.5
+friction = 0.75
+heats_into = { into = "lava", at = 1000, latent = 400 }
+
+[[material]]
+id = "lava"
+name = "Lava"
+kind = "liquid"
+color = "#ff5a1f"
+density = 2500
+heat_capacity = 2.0
+conductivity = 1.0
+spread = 0.25
+glow = 0.6
+spawn_temp = 1300
+
+[[material]]
+id = "wood"
+name = "Wood"
+kind = "solid"
+color = "#8a5a32"
+density = 700
+heat_capacity = 1.5
+conductivity = 0.15
+burns = { into = "fire", at = 250, heat = 1500, chance = 0.25 }
+
+[[material]]
+id = "oil"
+name = "Oil"
+kind = "liquid"
+color = "#4a3a1c"
+density = 850
+heat_capacity = 2.0
+conductivity = 0.15
+spread = 0.7
+burns = { into = "fire", at = 220, heat = 1800, chance = 0.2 }
+
+[[material]]
+id = "fire"
+name = "Fire"
+kind = "gas"
+color = "#ffb030"
+density = 1.0
+heat_capacity = 2.0
+conductivity = 0.5
+spread = 0.5
+glow = 1.0
+spawn_temp = 1000
+decays = { into = "air", chance = 0.025 }

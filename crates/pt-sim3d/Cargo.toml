@@ -1,0 +1,5 @@
+[package]
+name = "pt-sim3d"
+version.workspace = true
+edition.workspace = true
+[dependencies]

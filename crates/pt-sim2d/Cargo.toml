@@ -1,0 +1,15 @@
+[package]
+name = "pt-sim2d"
+description = "2D falling-sand prototype on the GPU"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pt-core.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

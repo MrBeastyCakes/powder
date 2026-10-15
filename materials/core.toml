@@ -10,6 +10,9 @@
 # materials; absolute values are tuned so changes are visible in seconds.
 #
 # kind:          empty | solid | powder | liquid | gas
+# tags:          optional extra categories for the material picker, like
+#                ["explosive"]: lower case letters, digits and `-`. Each tag
+#                any material uses gets its own entry in the picker's rail.
 # heats_into:    phase change when heated past `at`. It absorbs `latent` energy
 #                on the way, and the reverse change (freezing, condensing) is
 #                derived automatically and releases the same energy.

@@ -19,6 +19,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, Wind
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+mod catalog;
 mod layout;
 mod ui;
 
@@ -57,6 +58,12 @@ pub struct Settings {
     pub size_3d: u32,
     pub target_3d: Target,
     pub show_menu: bool,
+    /// The rail entry the material picker shows.
+    pub category: catalog::Category,
+    /// Materials painted with most recently, newest first.
+    pub recent: Vec<u32>,
+    /// The brush size popup above the panel.
+    pub show_brush: bool,
 }
 
 impl Settings {
@@ -290,10 +297,12 @@ impl ApplicationHandler for App {
             let format = surface_config(&surface, &gpu, [size.width, size.height]).format;
             let table = MaterialTable::core();
             let egui_ctx = egui::Context::default();
+            ui::install_fonts(&egui_ctx);
             let egui_renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
+            let sand = table.expect_id("sand");
             let settings = Settings {
                 mode: Mode::TwoD,
-                material: table.expect_id("sand"),
+                material: sand,
                 tool: ToolKind::Material,
                 brush_2d: 24.0,
                 brush_3d: 3.0,
@@ -306,6 +315,9 @@ impl ApplicationHandler for App {
                 size_3d: 128,
                 target_3d: Target::Surface,
                 show_menu: false,
+                category: catalog::Category::Kind(table.def(sand).kind),
+                recent: vec![],
+                show_brush: false,
             };
             let stats = ui::Stats::new(gpu.adapter_name());
             self.engine = Some(Engine {
@@ -606,6 +618,10 @@ impl Engine {
         let paint_pos = pointers.paint.and_then(|(id, last)| pointers.position(id).map(|p| (id, last, p)));
         if let Some((id, _, p)) = paint_pos {
             pointers.paint = Some((id, p));
+            // Recent lists what was painted with, not everything tapped while browsing.
+            if self.settings.tool == ToolKind::Material && self.settings.recent.first() != Some(&self.settings.material) {
+                catalog::remember(&mut self.settings.recent, self.settings.material);
+            }
         }
 
         let target = frame.texture.create_view(&Default::default());

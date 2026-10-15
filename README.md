@@ -13,7 +13,7 @@ for every later phase can be chosen from measurements and playtests.
 | `crates/pt-core` | Loads and validates material packs, compiles them into the GPU table, and holds the WGSL both simulations share (heat, phase changes, reactions, color) |
 | `crates/pt-sim2d` | The 2D simulation and renderer (WGSL compute and fragment shaders) |
 | `crates/pt-sim3d` | The 3D voxel simulation, brush picking and ray-marched renderer |
-| `crates/pt-app` | The touch app: an upright 4:3 sim area on a keyboard-height control panel, with an on-device benchmark. The 3D prototype is shelved and no longer offered in the app |
+| `crates/pt-app` | The touch app: an upright 4:3 sim area on a keyboard-height control panel (a catalog: category rail and material list, built from the pack's kinds and tags), with an on-device benchmark. The 3D prototype is shelved and no longer offered in the app |
 | `crates/pt-bench` | The standard benchmark and a screenshot tool, runnable headless |
 | `mobile/android` | Android packaging (native Rust NativeActivity, Vulkan); see its README |
 
@@ -74,9 +74,12 @@ Done:
 - 2D world at native resolution with movement, heat, phase changes, burning
 - 3D voxel world with the same core, ray-marched rendering, painting on
   surfaces or on a movable plane
-- Touch app with material bar, heat and cool tools, temperature view, pause and
-  step, 2D and 3D switch, world size picker and on-device benchmark
-- 21 tests (7 material, 9 2D, 5 3D) passing on a software GPU
+- Touch app with a catalog picker (a rail of Recent, Tools and every kind and
+  tag in the pack, and a material list whose descriptions come from the pack),
+  heat and cool tools, temperature view, pause, step and speed, and an
+  on-device benchmark. UI fonts are IBM Plex, subset and renamed under the
+  SIL Open Font License (`crates/pt-app/fonts`)
+- 31 tests (8 material, 9 app, 9 2D, 5 3D) passing on a software GPU
 - Android target type-checks; APK packaging set up with cargo-apk
 
 Next:

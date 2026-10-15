@@ -356,3 +356,35 @@ fn falls_accelerate() {
         "falls should speed up: {d30} rows after 30 ticks, {d60} after 60"
     );
 }
+
+#[test]
+fn heat_sleeps_when_even_and_wakes_for_the_heat_tool() {
+    let gpu = gpu();
+    let t = MaterialTable::core();
+    let wall = t.expect_id("wall");
+    let mut w = World::new(256, 256);
+    w.fill(0, 248, 256, 256, wall, 20.0);
+    let mut sim = w.sim(&gpu, &t, 2);
+    sim.run(&gpu, 10);
+    assert!(
+        sim.read_heat_awake(&gpu).iter().all(|&a| !a),
+        "an even 20° world should not run heat"
+    );
+
+    // Heating one spot wakes heat there and the warmth spreads.
+    for _ in 0..20 {
+        sim.stroke(Stroke {
+            from: [128.0, 128.0],
+            to: [128.0, 128.0],
+            radius: 3.0,
+            tool: Tool::Heat,
+        });
+        sim.run(&gpu, 1);
+    }
+    assert!(sim.read_heat_awake(&gpu).iter().any(|&a| a));
+    sim.run(&gpu, 60);
+    let therm = sim.read_therm(&gpu);
+    let at = |x: u32, y: u32| therm[(y * 256 + x) as usize][0];
+    assert!(at(128, 128) > 25.0, "the heated spot should stay warm: {}", at(128, 128));
+    assert!(at(134, 128) > 20.5, "heat should spread to neighbours: {}", at(134, 128));
+}

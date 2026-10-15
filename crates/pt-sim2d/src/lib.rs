@@ -80,9 +80,10 @@ pub struct Sim2d {
     materials: wgpu::Buffer,
     cells: [wgpu::Buffer; 2],
     therm: [wgpu::Buffer; 2],
-    /// Per chunk: something moved there this tick.
+    /// Per chunk: something moved (bit 0) or warmed (bit 1) there this tick.
     moved: wgpu::Buffer,
-    /// Per chunk: movement passes run there this tick.
+    /// Per chunk: movement passes run there (bit 0), and for how many more
+    /// ticks the heat pass runs (bits 1 and up).
     awake: wgpu::Buffer,
     params: wgpu::Buffer,
     brush: wgpu::Buffer,
@@ -152,6 +153,7 @@ impl Sim2d {
                 layout::storage(2, S::COMPUTE, false),
                 layout::storage(3, S::COMPUTE, false),
                 layout::storage(4, S::COMPUTE, false),
+                layout::storage(5, S::COMPUTE, false),
             ],
         });
 
@@ -187,6 +189,7 @@ impl Sim2d {
                     entry(2, cells[i].as_entire_binding()),
                     entry(3, therm[i].as_entire_binding()),
                     entry(4, moved.as_entire_binding()),
+                    entry(5, awake.as_entire_binding()),
                 ],
             })
         });
@@ -270,9 +273,10 @@ impl Sim2d {
     /// Wakes every chunk, so the next tick looks at the whole world.
     pub fn wake_all(&self, gpu: &Gpu) {
         let [cw, ch] = self.chunk_dims();
-        let ones = vec![1u32; (cw * ch) as usize];
-        gpu.queue.write_buffer(&self.moved, 0, bytemuck::cast_slice(&ones));
-        gpu.queue.write_buffer(&self.awake, 0, bytemuck::cast_slice(&ones));
+        let n = (cw * ch) as usize;
+        gpu.queue.write_buffer(&self.moved, 0, bytemuck::cast_slice(&vec![3u32; n]));
+        gpu.queue
+            .write_buffer(&self.awake, 0, bytemuck::cast_slice(&vec![1u32 | 2 << 1; n]));
     }
 
     /// Queues a brush stroke; it is applied at the start of the next
@@ -413,9 +417,17 @@ impl Sim2d {
 
     /// Reads which chunks run movement passes next tick, row by row. Slow.
     pub fn read_awake(&self, gpu: &Gpu) -> Vec<bool> {
+        self.read_awake_raw(gpu).into_iter().map(|a| a & 1 != 0).collect()
+    }
+
+    /// Reads which chunks run the heat pass next tick, row by row. Slow.
+    pub fn read_heat_awake(&self, gpu: &Gpu) -> Vec<bool> {
+        self.read_awake_raw(gpu).into_iter().map(|a| a >> 1 != 0).collect()
+    }
+
+    fn read_awake_raw(&self, gpu: &Gpu) -> Vec<u32> {
         let [cw, ch] = self.chunk_dims();
-        let raw: Vec<u32> = gpu.read_buffer(&self.awake, 0, (cw * ch) as usize);
-        raw.into_iter().map(|a| a != 0).collect()
+        gpu.read_buffer(&self.awake, 0, (cw * ch) as usize)
     }
 
     /// Reads the current cells back. Slow.

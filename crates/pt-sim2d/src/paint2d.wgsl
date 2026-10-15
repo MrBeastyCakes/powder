@@ -16,12 +16,18 @@ const MODE_COOL: u32 = 4u;
 @group(0) @binding(1) var<uniform> brush: Brush;
 @group(0) @binding(2) var<storage, read_write> cells: array<u32>;
 @group(0) @binding(3) var<storage, read_write> therm: array<vec2<f32>>;
-// The simulation's chunk marks (see sim2d.wgsl): painted chunks wake up.
+// The simulation's chunk marks and wake flags (see sim2d.wgsl): painted
+// chunks wake up. The heat pass of the very next tick must run there, since
+// only the buffer pair painted into holds the new cells.
 @group(0) @binding(4) var<storage, read_write> moved: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> awake: array<u32>;
 
 fn wake(x: i32, y: i32) {
     let cw = (brush.width + 63u) / 64u;
-    atomicStore(&moved[(u32(y) / 64u) * cw + u32(x) / 64u], 1u);
+    let c = (u32(y) / 64u) * cw + u32(x) / 64u;
+    atomicOr(&moved[c], 3u);
+    // Every painting thread writes the same value, so the race is harmless.
+    awake[c] = awake[c] | 4u;
 }
 
 fn segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -44,9 +50,11 @@ fn paint(@builtin(global_invocation_id) gid: vec3<u32>) {
     switch brush.mode {
         case MODE_HEAT: {
             therm[i].x = min(therm[i].x + 40.0 / materials.m[current].heat_capacity, MAX_TEMP);
+            wake(x, y);
         }
         case MODE_COOL: {
             therm[i].x = max(therm[i].x - 40.0 / materials.m[current].heat_capacity, MIN_TEMP);
+            wake(x, y);
         }
         case MODE_ERASE: {
             cells[i] = make_cell(0u, h >> 24u);

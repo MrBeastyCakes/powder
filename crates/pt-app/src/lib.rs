@@ -740,7 +740,7 @@ impl Engine {
     /// measured here; `pt-bench` still covers it.)
     fn run_benchmark(&mut self) {
         let [_, _, w, h] = self.layout.sim;
-        let results = vec![pt_bench::bench_2d(&self.gpu, &self.table, w.max(2), h.max(2), 120)];
+        let results = pt_bench::bench_2d_breakdown(&self.gpu, &self.table, w.max(2), h.max(2), 120);
         let report = pt_bench::table(&self.gpu.adapter_name(), &results);
         log::info!("benchmark\n{report}");
         self.stats.bench = Some(report);

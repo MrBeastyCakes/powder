@@ -17,8 +17,13 @@
 // moves a cell, or could have moved one but lost the dice roll, marks its
 // chunk in `moved`. At the end of each tick `settle` wakes every chunk next
 // to a marked one (a cell moves far less than a chunk in one tick), and
-// `reset` clears the marks. Movement passes skip blocks in sleeping chunks,
-// so a settled world costs only its heat pass.
+// `reset` clears the marks. Movement passes skip blocks in sleeping chunks.
+//
+// Heat sleeps too: the heat pass marks a chunk WARM when a cell's
+// temperature, stored latent heat or material changes noticeably. A chunk
+// with no moving or warm neighbours for two ticks skips the heat pass; by
+// then both buffer pairs hold the same values there, so skipping the copy
+// loses nothing. A settled, evenly warm world costs almost nothing.
 
 struct Params {
     width: u32,
@@ -40,6 +45,15 @@ struct Params {
 @group(0) @binding(7) var<storage, read_write> awake: array<u32>;
 
 const CHUNK: u32 = 64u;
+// Bits in `moved`.
+const MOVED: u32 = 1u;
+const WARM: u32 = 2u;
+// In `awake`: bit 0 runs the movement passes, bits 1 and up count down the
+// ticks the heat pass still runs (see sim2d.wgsl's header).
+const MOVE_AWAKE: u32 = 1u;
+const HEAT_TICKS: u32 = 2u;
+// Smallest temperature change, in degrees per tick, that keeps heat awake.
+const WARM_EPSILON: f32 = 0.001;
 // Velocity units are eighths of a cell per tick.
 const GRAVITY: u32 = 3u;
 const MAX_FALL: u32 = 160u;
@@ -53,18 +67,45 @@ fn chunks_x() -> u32 { return (params.width + CHUNK - 1u) / CHUNK; }
 fn chunks_y() -> u32 { return (params.height + CHUNK - 1u) / CHUNK; }
 fn chunk_of(x: u32, y: u32) -> u32 { return (y / CHUNK) * chunks_x() + x / CHUNK; }
 
-// Marks a chunk as moving. Most blocks in a busy chunk find it already
-// marked, so they only read.
-fn mark(c: u32) {
-    if (atomicLoad(&moved[c]) == 0u) {
-        atomicStore(&moved[c], 1u);
+// Marks a chunk as moving or warm. Most cells in a busy chunk find it
+// already marked, so they only read.
+fn mark(c: u32, bits: u32) {
+    if ((atomicLoad(&moved[c]) & bits) != bits) {
+        atomicOr(&moved[c], bits);
     }
 }
 
+fn mark_moved(c: u32) { mark(c, MOVED | WARM); }
+
+// What the heat pass's cells changed, gathered per workgroup so only one
+// thread per workgroup touches the chunk marks. A workgroup's 8 x 8 cells
+// always sit in one chunk.
+var<workgroup> wg_marks: atomic<u32>;
+
 @compute @workgroup_size(8, 8)
-fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = idx(gid.x, gid.y);
+fn heat(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_index) lid: u32,
+    @builtin(workgroup_id) wid: vec3<u32>,
+) {
+    if (lid == 0u) { atomicStore(&wg_marks, 0u); }
+    workgroupBarrier();
+    let chunk = chunk_of(min(wid.x * 8u, params.width - 1u), min(wid.y * 8u, params.height - 1u));
+    if (gid.x < params.width && gid.y < params.height && (awake[chunk] >> 1u) != 0u) {
+        let marks = heat_cell(gid.xy);
+        if (marks != 0u) { atomicOr(&wg_marks, marks); }
+    }
+    workgroupBarrier();
+    if (lid == 0u) {
+        let marks = atomicLoad(&wg_marks);
+        if (marks != 0u) { mark(chunk, marks); }
+    }
+}
+
+// Conducts heat into one cell and applies phase changes and reactions.
+// Returns the chunk marks the change calls for.
+fn heat_cell(p0: vec2<u32>) -> u32 {
+    let i = idx(p0.x, p0.y);
     let cell = cells_in[i];
     let mat = mat_of(cell);
     let th = therm_in[i];
@@ -73,7 +114,7 @@ fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
     var touches_air = false;
     var dirs = array<vec2<i32>, 4>(vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i32>(0, 1), vec2<i32>(0, -1));
     for (var d = 0u; d < 4u; d++) {
-        let p = vec2<i32>(gid.xy) + dirs[d];
+        let p = vec2<i32>(p0) + dirs[d];
         // The world's edges are insulated.
         if (p.x < 0 || p.y < 0 || p.x >= i32(params.width) || p.y >= i32(params.height)) { continue; }
         let j = idx(u32(p.x), u32(p.y));
@@ -90,8 +131,12 @@ fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
     therm_out[i] = vec2<f32>(s.temp, s.latent);
     // A phase change or reaction can set still material moving (ice melts).
     if (s.mat != mat) {
-        mark(chunk_of(gid.x, gid.y));
+        return MOVED | WARM;
     }
+    if (abs(s.temp - th.x) > WARM_EPSILON || s.latent != th.y) {
+        return WARM;
+    }
+    return 0u;
 }
 
 @compute @workgroup_size(64)
@@ -107,7 +152,7 @@ fn fall(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (y < 0) { break; }
         // Skip sleeping chunks a whole chunk at a time.
         if (y == h - 1 || u32(y) % CHUNK == CHUNK - 1u) {
-            if (awake[chunk_of(x, u32(y))] == 0u) {
+            if ((awake[chunk_of(x, u32(y))] & MOVE_AWAKE) == 0u) {
                 y = i32((u32(y) / CHUNK) * CHUNK) - 1;
                 space = -1;
                 continue;
@@ -136,8 +181,8 @@ fn fall(@builtin(global_invocation_id) gid: vec3<u32>) {
                 therm_out[i] = therm_out[j];
                 cells_out[j] = with_vel(c, nv);
                 therm_out[j] = t;
-                mark(chunk_of(x, u32(y)));
-                mark(chunk_of(x, u32(land)));
+                mark_moved(chunk_of(x, u32(y)));
+                mark_moved(chunk_of(x, u32(land)));
                 space = land - 1;
             }
         } else {
@@ -149,7 +194,8 @@ fn fall(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
-// End of tick: a chunk is awake if it or any neighbour moved this tick.
+// End of tick: a chunk moves next tick if it or any neighbour moved this
+// tick, and runs heat for two more ticks if any of them moved or warmed.
 @compute @workgroup_size(8, 8)
 fn settle(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cw = chunks_x();
@@ -165,7 +211,9 @@ fn settle(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
-    awake[gid.y * cw + gid.x] = any;
+    let c = gid.y * cw + gid.x;
+    let heat_left = select(max(awake[c] >> 1u, 1u) - 1u, HEAT_TICKS, any != 0u);
+    awake[c] = select(0u, MOVE_AWAKE, (any & MOVED) != 0u) | (heat_left << 1u);
 }
 
 @compute @workgroup_size(8, 8)
@@ -176,13 +224,15 @@ fn reset(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 var<private> blk_cell: array<u32, 4>;
-var<private> blk_therm: array<vec2<f32>, 4>;
+// Which slot each slot's cell came from. Temperatures are only read for
+// cells that move, which saves most of a pass's memory traffic.
+var<private> blk_src: array<u32, 4>;
 var<private> blk_mat: array<u32, 4>;
 var<private> blk_moved: array<bool, 4>;
 
 fn swap_cells(a: u32, b: u32) {
     let c = blk_cell[a]; blk_cell[a] = blk_cell[b]; blk_cell[b] = c;
-    let t = blk_therm[a]; blk_therm[a] = blk_therm[b]; blk_therm[b] = t;
+    let t = blk_src[a]; blk_src[a] = blk_src[b]; blk_src[b] = t;
     let m = blk_mat[a]; blk_mat[a] = blk_mat[b]; blk_mat[b] = m;
     blk_moved[a] = true;
     blk_moved[b] = true;
@@ -208,7 +258,7 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
     // A block on a chunk edge belongs to both chunks it touches.
     let c0 = chunk_of(u32(max(bx, 0)), u32(max(by, 0)));
     let c1 = chunk_of(u32(min(bx + 1, i32(params.width) - 1)), u32(min(by + 1, i32(params.height) - 1)));
-    if (awake[c0] == 0u && awake[c1] == 0u) { return; }
+    if (((awake[c0] | awake[c1]) & MOVE_AWAKE) == 0u) { return; }
     // Set when anything here moved or could have; keeps the chunk awake.
     var busy = false;
 
@@ -218,18 +268,20 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
         let x = bx + i32(k & 1u);
         let y = by + i32(k >> 1u);
         blk_moved[k] = false;
+        blk_src[k] = k;
         if (x >= 0 && y >= 0 && x < i32(params.width) && y < i32(params.height)) {
             let i = idx(u32(x), u32(y));
             valid[k] = true;
             blk_cell[k] = cells_out[i];
-            blk_therm[k] = therm_out[i];
             blk_mat[k] = mat_of(blk_cell[k]);
         } else {
             blk_cell[k] = OUTSIDE;
-            blk_therm[k] = vec2<f32>(0.0);
             blk_mat[k] = OUTSIDE;
         }
     }
+    // Four cells of one material (open air, the inside of a pile or a
+    // pool) can't move against each other.
+    if (blk_mat[0] == blk_mat[1] && blk_mat[0] == blk_mat[2] && blk_mat[0] == blk_mat[3]) { return; }
 
     let h = hash3(gid.x | (gid.y << 16u), params.tick, params.seed ^ params.salt);
     // Mirror the block at random so nothing drifts left or right.
@@ -293,14 +345,23 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
+    // Moved cells only trade places with each other, so read all of their
+    // temperatures before writing any.
+    var therm: array<vec2<f32>, 4>;
+    for (var k = 0u; k < 4u; k++) {
+        if (valid[k] && blk_moved[k]) {
+            let src = blk_src[k];
+            therm[k] = therm_out[idx(u32(bx + i32(src & 1u)), u32(by + i32(src >> 1u)))];
+        }
+    }
     for (var k = 0u; k < 4u; k++) {
         if (valid[k] && blk_moved[k]) {
             let i = idx(u32(bx + i32(k & 1u)), u32(by + i32(k >> 1u)));
             cells_out[i] = blk_cell[k];
-            therm_out[i] = blk_therm[k];
+            therm_out[i] = therm[k];
         }
     }
     if (busy) {
-        mark(c0);
+        mark_moved(c0);
     }
 }

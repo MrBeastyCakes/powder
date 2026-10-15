@@ -59,8 +59,10 @@ const MUTED: Color32 = Color32::from_rgb(0x9a, 0xa0, 0xad);
 const DIM: Color32 = Color32::from_rgb(0x8b, 0x92, 0xa0);
 const ACCENT: Color32 = Color32::from_rgb(0xff, 0xb0, 0x30);
 
-/// Movement passes per tick the speed keys step through.
-const MAX_SPEED: u32 = 8;
+/// Movement passes per tick the speed keys step through. 16 is normal
+/// speed (see `pt_sim2d::DEFAULT_SUBSTEPS`).
+const SPEEDS: [u32; 5] = [4, 8, 16, 24, 32];
+const SPEED_LABELS: [&str; 5] = ["¼×", "½×", "1×", "1½×", "2×"];
 /// Height of the top strip, its bottom rule included.
 const STRIP_H: f32 = 53.0;
 const RAIL_W: f32 = 68.0;
@@ -313,21 +315,24 @@ fn top_strip(ui: &egui::Ui, rect: Rect, s: &mut Settings) {
 
     let speed = at(step.right() + 6.0, 94.0);
     p.rect_filled(speed, 10, KEY);
+    let level = SPEEDS.iter().position(|&n| n >= s.substeps).unwrap_or(SPEEDS.len() - 1);
+    let can_slow = level > 0;
+    let can_speed = level + 1 < SPEEDS.len();
     let slower = at(speed.left(), 34.0);
-    if key(ui, slower, "slower", s.substeps > 1, Color32::TRANSPARENT).clicked() {
-        s.substeps -= 1;
+    if key(ui, slower, "slower", can_slow, Color32::TRANSPARENT).clicked() && can_slow {
+        s.substeps = SPEEDS[level - 1];
     }
     let faster = at(speed.right() - 34.0, 34.0);
-    if key(ui, faster, "faster", s.substeps < MAX_SPEED, Color32::TRANSPARENT).clicked() {
-        s.substeps += 1;
+    if key(ui, faster, "faster", can_speed, Color32::TRANSPARENT).clicked() && can_speed {
+        s.substeps = SPEEDS[level + 1];
     }
     let dim = |on: bool| if on { TEXT } else { TEXT.gamma_multiply(0.4) };
-    paint_icon(p, Icon::Minus, slower.center(), 14.0, dim(s.substeps > 1));
-    paint_icon(p, Icon::Plus, faster.center(), 14.0, dim(s.substeps < MAX_SPEED));
+    paint_icon(p, Icon::Minus, slower.center(), 14.0, dim(can_slow));
+    paint_icon(p, Icon::Plus, faster.center(), 14.0, dim(can_speed));
     p.text(
         speed.center(),
         egui::Align2::CENTER_CENTER,
-        format!("{}×", s.substeps),
+        SPEED_LABELS[level],
         FontId::monospace(13.0),
         TEXT,
     );

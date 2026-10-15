@@ -5,6 +5,13 @@
 // the world is cut into 2 x 2 blocks, each thread owns one block, and the
 // block grid shifts by one cell between passes so material can cross block
 // edges. No two threads touch the same cell, so there are no locks.
+//
+// Sleeping chunks: the world is also cut into 64 x 64 chunks. Any pass that
+// moves a cell, or could have moved one but lost the dice roll, marks its
+// chunk in `moved`. At the end of each tick `settle` wakes every chunk next
+// to a marked one (a cell moves far less than a chunk in one tick), and
+// `reset` clears the marks. Movement passes skip blocks in sleeping chunks,
+// so a settled world costs only its heat pass.
 
 struct Params {
     width: u32,
@@ -22,8 +29,24 @@ struct Params {
 @group(0) @binding(3) var<storage, read> therm_in: array<vec2<f32>>;
 @group(0) @binding(4) var<storage, read_write> cells_out: array<u32>;
 @group(0) @binding(5) var<storage, read_write> therm_out: array<vec2<f32>>;
+@group(0) @binding(6) var<storage, read_write> moved: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> awake: array<u32>;
+
+const CHUNK: u32 = 64u;
 
 fn idx(x: u32, y: u32) -> u32 { return y * params.width + x; }
+
+fn chunks_x() -> u32 { return (params.width + CHUNK - 1u) / CHUNK; }
+fn chunks_y() -> u32 { return (params.height + CHUNK - 1u) / CHUNK; }
+fn chunk_of(x: u32, y: u32) -> u32 { return (y / CHUNK) * chunks_x() + x / CHUNK; }
+
+// Marks a chunk as moving. Most blocks in a busy chunk find it already
+// marked, so they only read.
+fn mark(c: u32) {
+    if (atomicLoad(&moved[c]) == 0u) {
+        atomicStore(&moved[c], 1u);
+    }
+}
 
 @compute @workgroup_size(8, 8)
 fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -51,6 +74,36 @@ fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
     s = react(s, touches_air, hash3(i, params.tick, params.seed));
     cells_out[i] = make_cell(s.mat, shade_of(cell));
     therm_out[i] = vec2<f32>(s.temp, s.latent);
+    // A phase change or reaction can set still material moving (ice melts).
+    if (s.mat != mat) {
+        mark(chunk_of(gid.x, gid.y));
+    }
+}
+
+// End of tick: a chunk is awake if it or any neighbour moved this tick.
+@compute @workgroup_size(8, 8)
+fn settle(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let cw = chunks_x();
+    let ch = chunks_y();
+    if (gid.x >= cw || gid.y >= ch) { return; }
+    var any = 0u;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let x = i32(gid.x) + dx;
+            let y = i32(gid.y) + dy;
+            if (x >= 0 && y >= 0 && x < i32(cw) && y < i32(ch)) {
+                any |= atomicLoad(&moved[u32(y) * cw + u32(x)]);
+            }
+        }
+    }
+    awake[gid.y * cw + gid.x] = any;
+}
+
+@compute @workgroup_size(8, 8)
+fn reset(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let cw = chunks_x();
+    if (gid.x >= cw || gid.y >= chunks_y()) { return; }
+    atomicStore(&moved[gid.y * cw + gid.x], 0u);
 }
 
 var<private> blk_cell: array<u32, 4>;
@@ -83,6 +136,13 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
     let by = i32(gid.y) * 2 - off;
     if (bx >= i32(params.width) || by >= i32(params.height)) { return; }
 
+    // A block on a chunk edge belongs to both chunks it touches.
+    let c0 = chunk_of(u32(max(bx, 0)), u32(max(by, 0)));
+    let c1 = chunk_of(u32(min(bx + 1, i32(params.width) - 1)), u32(min(by + 1, i32(params.height) - 1)));
+    if (awake[c0] == 0u && awake[c1] == 0u) { return; }
+    // Set when anything here moved or could have; keeps the chunk awake.
+    var busy = false;
+
     // Block slots: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right.
     var valid = array<bool, 4>(false, false, false, false);
     for (var k = 0u; k < 4u; k++) {
@@ -114,7 +174,9 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var c = 0u; c < 2u; c++) {
         let top = cols[c];
         let bot = top + 2u;
-        if (heavier(blk_mat[top], blk_mat[bot]) && rand01(pcg(h + c)) < sink_chance(blk_mat[top], blk_mat[bot])) {
+        let sinks = heavier(blk_mat[top], blk_mat[bot]);
+        busy = busy || sinks;
+        if (sinks && rand01(pcg(h + c)) < sink_chance(blk_mat[top], blk_mat[bot])) {
             swap_cells(top, bot);
         }
     }
@@ -127,6 +189,7 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
         let k = kind_of(blk_mat[top]);
         if ((k == KIND_POWDER || k == KIND_LIQUID) && !blk_moved[top] && !blk_moved[other + 2u]) {
             if (!heavier(blk_mat[top], blk_mat[top + 2u]) && heavier(blk_mat[top], blk_mat[other + 2u])) {
+                busy = true;
                 let stick = select(0.0, materials.m[blk_mat[top]].friction, k == KIND_POWDER);
                 if (rand01(pcg(h ^ (0x9e37u + c))) >= stick) {
                     swap_cells(top, other + 2u);
@@ -136,6 +199,7 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
         let bot = top + 2u;
         if (kind_of(blk_mat[bot]) == KIND_GAS && !blk_moved[bot] && !blk_moved[other]) {
             if (!heavier(blk_mat[top], blk_mat[bot]) && heavier(blk_mat[other], blk_mat[bot])) {
+                busy = true;
                 swap_cells(bot, other);
             }
         }
@@ -145,7 +209,9 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var row = 0u; row < 4u; row += 2u) {
         let a = l + row;
         let b = r + row;
-        if (!blk_moved[a] && !blk_moved[b] && flows_sideways(blk_mat[a], blk_mat[b])) {
+        let flows = flows_sideways(blk_mat[a], blk_mat[b]);
+        busy = busy || flows;
+        if (!blk_moved[a] && !blk_moved[b] && flows) {
             let sa = select(0.0, materials.m[blk_mat[a]].spread, blk_mat[a] < 128u);
             let sb = select(0.0, materials.m[blk_mat[b]].spread, blk_mat[b] < 128u);
             if (rand01(pcg(h ^ (0x51edu + row))) < max(sa, sb)) {
@@ -160,5 +226,8 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
             cells_out[i] = blk_cell[k];
             therm_out[i] = blk_therm[k];
         }
+    }
+    if (busy) {
+        mark(c0);
     }
 }

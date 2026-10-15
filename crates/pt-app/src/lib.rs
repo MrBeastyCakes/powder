@@ -310,7 +310,7 @@ impl ApplicationHandler for App {
                 paused: false,
                 step_once: false,
                 temperature_view: false,
-                substeps: 4,
+                substeps: pt_sim2d::DEFAULT_SUBSTEPS,
                 heat_speed: 1.0,
                 size_3d: 128,
                 target_3d: Target::Surface,

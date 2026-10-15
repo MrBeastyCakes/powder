@@ -14,6 +14,14 @@ pub mod scenes;
 /// passes for each tick.
 const PARAM_SLOTS: u64 = 128;
 
+/// Side of a sleeping chunk in cells; matches `CHUNK` in sim2d.wgsl.
+pub const CHUNK: u32 = 64;
+
+/// Movement passes per tick unless the player changes it. A falling grain
+/// moves at most one cell per pass, so 16 passes at 60 ticks a second drop
+/// sand through a 1,440-cell sim area in under 2 seconds.
+pub const DEFAULT_SUBSTEPS: u32 = 16;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
@@ -64,13 +72,18 @@ pub struct Sim2d {
     pub seed: u32,
     /// Multiplier on every material's conductivity.
     pub heat_speed: f32,
-    /// Movement passes per tick. More passes let liquids level faster.
+    /// Movement passes per tick. Each pass moves a cell at most one cell, so
+    /// this sets how fast things fall and flow.
     pub move_substeps: u32,
     pub table: MaterialTable,
 
     materials: wgpu::Buffer,
     cells: [wgpu::Buffer; 2],
     therm: [wgpu::Buffer; 2],
+    /// Per chunk: something moved there this tick.
+    moved: wgpu::Buffer,
+    /// Per chunk: movement passes run there this tick.
+    awake: wgpu::Buffer,
     params: wgpu::Buffer,
     brush: wgpu::Buffer,
     /// Index of the buffer pair holding the latest state.
@@ -80,6 +93,8 @@ pub struct Sim2d {
     paint_groups: [wgpu::BindGroup; 2],
     heat_pipe: wgpu::ComputePipeline,
     move_pipe: wgpu::ComputePipeline,
+    settle_pipe: wgpu::ComputePipeline,
+    reset_pipe: wgpu::ComputePipeline,
     paint_pipe: wgpu::ComputePipeline,
     pending_stroke: Option<Stroke>,
 }
@@ -99,6 +114,9 @@ impl Sim2d {
         };
         let cells = [make("cells a", cell_count * 4), make("cells b", cell_count * 4)];
         let therm = [make("therm a", cell_count * 8), make("therm b", cell_count * 8)];
+        let chunk_count = (width.div_ceil(CHUNK) * height.div_ceil(CHUNK)) as u64;
+        let moved = make("chunks moved", chunk_count * 4);
+        let awake = make("chunks awake", chunk_count * 4);
         let materials = material_buffer(device, &table);
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sim2d params"),
@@ -121,6 +139,8 @@ impl Sim2d {
                 layout::storage(3, S::COMPUTE, true),
                 layout::storage(4, S::COMPUTE, false),
                 layout::storage(5, S::COMPUTE, false),
+                layout::storage(6, S::COMPUTE, false),
+                layout::storage(7, S::COMPUTE, false),
             ],
         });
         let paint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -130,6 +150,7 @@ impl Sim2d {
                 layout::uniform(1, S::COMPUTE, false),
                 layout::storage(2, S::COMPUTE, false),
                 layout::storage(3, S::COMPUTE, false),
+                layout::storage(4, S::COMPUTE, false),
             ],
         });
 
@@ -150,6 +171,8 @@ impl Sim2d {
                     entry(3, therm[src].as_entire_binding()),
                     entry(4, cells[dst].as_entire_binding()),
                     entry(5, therm[dst].as_entire_binding()),
+                    entry(6, moved.as_entire_binding()),
+                    entry(7, awake.as_entire_binding()),
                 ],
             })
         });
@@ -162,6 +185,7 @@ impl Sim2d {
                     entry(1, brush.as_entire_binding()),
                     entry(2, cells[i].as_entire_binding()),
                     entry(3, therm[i].as_entire_binding()),
+                    entry(4, moved.as_entire_binding()),
                 ],
             })
         });
@@ -191,14 +215,18 @@ impl Sim2d {
             tick: 0,
             seed,
             heat_speed: 1.0,
-            move_substeps: 4,
+            move_substeps: DEFAULT_SUBSTEPS,
             heat_pipe: compute_pipeline(device, &step_pl, &sim_module, "heat"),
             move_pipe: compute_pipeline(device, &step_pl, &sim_module, "move_blocks"),
+            settle_pipe: compute_pipeline(device, &step_pl, &sim_module, "settle"),
+            reset_pipe: compute_pipeline(device, &step_pl, &sim_module, "reset"),
             paint_pipe: compute_pipeline(device, &paint_pl, &paint_module, "paint"),
             table,
             materials,
             cells,
             therm,
+            moved,
+            awake,
             params,
             brush,
             current: 0,
@@ -212,6 +240,11 @@ impl Sim2d {
 
     pub fn cell_count(&self) -> u64 {
         self.width as u64 * self.height as u64
+    }
+
+    /// The chunk grid's size in chunks.
+    pub fn chunk_dims(&self) -> [u32; 2] {
+        [self.width.div_ceil(CHUNK), self.height.div_ceil(CHUNK)]
     }
 
     /// Fills the world with air at room temperature.
@@ -229,6 +262,15 @@ impl Sim2d {
         let therm: Vec<[f32; 2]> = temps.iter().map(|&t| [t, 0.0]).collect();
         gpu.queue.write_buffer(&self.cells[self.current], 0, bytemuck::cast_slice(cells));
         gpu.queue.write_buffer(&self.therm[self.current], 0, bytemuck::cast_slice(&therm));
+        self.wake_all(gpu);
+    }
+
+    /// Wakes every chunk, so the next tick looks at the whole world.
+    pub fn wake_all(&self, gpu: &Gpu) {
+        let [cw, ch] = self.chunk_dims();
+        let ones = vec![1u32; (cw * ch) as usize];
+        gpu.queue.write_buffer(&self.moved, 0, bytemuck::cast_slice(&ones));
+        gpu.queue.write_buffer(&self.awake, 0, bytemuck::cast_slice(&ones));
     }
 
     /// Queues a brush stroke; it is applied at the start of the next
@@ -279,6 +321,7 @@ impl Sim2d {
         let cells_y = self.height.div_ceil(8);
         let blocks_x = (self.width / 2 + 1).div_ceil(8);
         let blocks_y = (self.height / 2 + 1).div_ceil(8);
+        let [cw, ch] = self.chunk_dims();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("sim2d"),
             timestamp_writes: None,
@@ -296,6 +339,13 @@ impl Sim2d {
                 pass.dispatch_workgroups(blocks_x, blocks_y, 1);
                 slot += 1;
             }
+            // The chunk passes only read the world size, so any slot will do.
+            let last = (slot - 1) * UNIFORM_SLOT as u32;
+            pass.set_bind_group(0, group, &[last]);
+            pass.set_pipeline(&self.settle_pipe);
+            pass.dispatch_workgroups(cw.div_ceil(8), ch.div_ceil(8), 1);
+            pass.set_pipeline(&self.reset_pipe);
+            pass.dispatch_workgroups(cw.div_ceil(8), ch.div_ceil(8), 1);
             self.current = 1 - self.current;
         }
         drop(pass);
@@ -355,6 +405,13 @@ impl Sim2d {
             }
         }
         gpu.wait();
+    }
+
+    /// Reads which chunks run movement passes next tick, row by row. Slow.
+    pub fn read_awake(&self, gpu: &Gpu) -> Vec<bool> {
+        let [cw, ch] = self.chunk_dims();
+        let raw: Vec<u32> = gpu.read_buffer(&self.awake, 0, (cw * ch) as usize);
+        raw.into_iter().map(|a| a != 0).collect()
     }
 
     /// Reads the current cells back. Slow.

@@ -259,3 +259,74 @@ fn paint_and_erase() {
     assert_eq!(count(&sim.read_cells(&gpu), wall), 0);
     assert_eq!(sim.inspect(&gpu, 30, 10).map(|c| c.0), Some(0));
 }
+
+#[test]
+fn sand_drops_through_the_sim_area_in_two_seconds() {
+    // The Phase 1 gate: on a Pixel's 1,440-cell-tall sim area, dropped sand
+    // reaches the floor within 2 seconds, which is 120 ticks at 60 a second.
+    let gpu = gpu();
+    let t = MaterialTable::core();
+    let sand = t.expect_id("sand");
+    let (wd, ht) = (128, 1440);
+    let mut w = World::new(wd, ht);
+    w.fill(56, 0, 72, 4, sand, 20.0);
+    let mut sim = w.sim(&gpu, &t, 3);
+    sim.run(&gpu, 120);
+    let cells = sim.read_cells(&gpu);
+    let floor = &cells[((ht - 32) * wd) as usize..];
+    let landed = count(floor, sand);
+    assert!(landed >= 64 * 9 / 10, "only {landed} of 64 grains reached the floor in 120 ticks");
+}
+
+#[test]
+fn settled_chunks_sleep_and_paint_wakes_them() {
+    let gpu = gpu();
+    let t = MaterialTable::core();
+    let sand = t.expect_id("sand");
+    let wall = t.expect_id("wall");
+    let mut w = World::new(256, 256);
+    w.fill(0, 248, 256, 256, wall, 20.0);
+    w.fill(32, 100, 224, 140, sand, 20.0);
+    let mut sim = w.sim(&gpu, &t, 5);
+    assert!(sim.read_awake(&gpu).iter().all(|&a| a), "a new world starts awake");
+
+    sim.run(&gpu, 600);
+    let awake = sim.read_awake(&gpu);
+    assert!(awake.iter().all(|&a| !a), "settled sand should sleep: {awake:?}");
+
+    // Sand painted into the sleeping world wakes its chunks and falls.
+    sim.stroke(Stroke {
+        from: [128.0, 10.0],
+        to: [128.0, 10.0],
+        radius: 4.0,
+        tool: Tool::Paint(sand),
+    });
+    sim.run(&gpu, 2);
+    assert!(sim.read_awake(&gpu).iter().any(|&a| a), "painting should wake the world");
+    let before = count(&sim.read_cells(&gpu)[..(256 * 20) as usize], sand);
+    assert!(before > 0);
+    sim.run(&gpu, 120);
+    let after = count(&sim.read_cells(&gpu)[..(256 * 20) as usize], sand);
+    assert_eq!(after, 0, "painted sand should fall out of the top rows");
+}
+
+#[test]
+fn melting_wakes_a_sleeping_chunk() {
+    // Ice resting on a floor sleeps; when hot lava melts it, the water must
+    // still flow even though nothing moved in that chunk before.
+    let gpu = gpu();
+    let t = MaterialTable::core();
+    let ice = t.expect_id("ice");
+    let water = t.expect_id("water");
+    let wall = t.expect_id("wall");
+    let mut w = World::new(128, 64);
+    w.fill(0, 60, 128, 64, wall, 20.0);
+    w.fill(60, 40, 68, 60, ice, 200.0);
+    let mut sim = w.sim(&gpu, &t, 9);
+    sim.run(&gpu, 600);
+    let cells = sim.read_cells(&gpu);
+    assert!(count(&cells, ice) == 0, "the hot ice should have melted");
+    // Melted water spreads into a thin layer instead of standing as a column.
+    let column_top = &cells[(45 * 128) as usize..(46 * 128) as usize];
+    assert_eq!(count(column_top, water), 0, "melted water should flow out, not stand still");
+}

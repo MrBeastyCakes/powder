@@ -73,18 +73,31 @@ jobs:
           gh release create latest-apk powder-toy-next.apk --prerelease --target "$GITHUB_SHA" \
             --title "Latest APK" \
             --notes "Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}. Open this page on your Android phone and tap powder-toy-next.apk to install (allow installs from your browser when asked)."
-      - name: Publish the tagged release
-        # Notes come from release-notes/<tag>.md. A tag with a hyphen
-        # (alpha, beta, rc) is marked as a pre-release.
-        if: github.ref_type == 'tag'
+      - name: Publish version releases
+        # A version release is published by pushing its tag, or by merging
+        # release-notes/<tag>.md to main: each notes file without a release
+        # yet gets one, tagged at this commit. A tag with a hyphen (alpha,
+        # beta, rc) is marked as a pre-release.
+        if: github.ref_type == 'tag' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="$GITHUB_REF_NAME"
-          cp powder-toy-next.apk "powder-toy-next-$tag.apk"
-          pre=""
-          case "$tag" in *-*) pre="--prerelease" ;; esac
-          notes="release-notes/$tag.md"
-          [ -f "$notes" ] || { echo "Built from ${GITHUB_SHA::7}." > "$notes"; }
-          gh release create "$tag" "powder-toy-next-$tag.apk" $pre --latest=false --verify-tag \
-            --title "Powder Toy Next $tag" --notes-file "$notes"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tags="$GITHUB_REF_NAME"
+          else
+            tags=""
+            for f in release-notes/v*.md; do
+              [ -e "$f" ] || continue
+              t=$(basename "$f" .md)
+              gh release view "$t" > /dev/null 2>&1 || tags="$tags $t"
+            done
+          fi
+          for tag in $tags; do
+            cp powder-toy-next.apk "powder-toy-next-$tag.apk"
+            pre=""
+            case "$tag" in *-*) pre="--prerelease" ;; esac
+            notes="release-notes/$tag.md"
+            [ -f "$notes" ] || echo "Built from ${GITHUB_SHA::7}." > "$notes"
+            gh release create "$tag" "powder-toy-next-$tag.apk" $pre --latest=false --target "$GITHUB_SHA" \
+              --title "Powder Toy Next $tag" --notes-file "$notes"
+          done

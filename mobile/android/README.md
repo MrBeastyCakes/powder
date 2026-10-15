@@ -30,6 +30,24 @@ The APK lands in `target/release/apk/powder-toy-next.apk`; `cargo apk build
 -p pt-app --release` builds without installing. Logs show up under the
 `powder-toy` tag: `adb logcat -s powder-toy`.
 
+## Signing key for CI builds
+
+CI signs every APK with one key so each build installs over the last one and
+keeps its saves. The key lives in two repository secrets. To set them up once,
+on a machine with a JDK and the GitHub CLI:
+
+```sh
+keytool -genkeypair -keystore powder.keystore -alias powder -keyalg RSA \
+  -keysize 2048 -validity 10000 -dname "CN=Powder Toy Next"   # asks for a password
+gh secret set ANDROID_KEYSTORE_PASSWORD -R MrBeastyCakes/powder  # paste the same password
+base64 < powder.keystore | tr -d "\n" | gh secret set ANDROID_KEYSTORE_BASE64 -R MrBeastyCakes/powder
+```
+
+Keep `powder.keystore` somewhere safe and out of the repository. Without the
+secrets, CI makes a throwaway key per build (and warns), so each APK must
+replace the installed app. The first build with the new key also needs one
+uninstall, since its key differs from the earlier throwaway ones.
+
 ## Status
 
 The Android target type-checks in CI (`cargo check -p pt-app --target

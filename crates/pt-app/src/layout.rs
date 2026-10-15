@@ -19,6 +19,10 @@ pub struct Layout {
 /// keyboard takes with its suggestion strip, so every control is in thumb reach.
 pub const PANEL_POINTS: f32 = 300.0;
 
+/// The panel gives up height down to this before the sim area narrows, so a
+/// tall status bar costs a little panel rather than the full-width world.
+pub const MIN_PANEL_POINTS: f32 = 240.0;
+
 /// Bottom rows kept clear even when Android reports no inset, so no control
 /// sits on the gesture bar.
 pub const MIN_BOTTOM_POINTS: f32 = 24.0;
@@ -26,20 +30,23 @@ pub const MIN_BOTTOM_POINTS: f32 = 24.0;
 /// Lays out a screen of `size` pixels at `scale` pixels per point, with the
 /// system bars covering `insets` rows at the top and bottom.
 ///
-/// The sim area takes the full width when it fits. On a screen too short for
-/// that, it keeps 4:3 and narrows, centred.
+/// The sim area takes the full width when it fits, shrinking the panel toward
+/// [`MIN_PANEL_POINTS`] if it must. On a screen too short even for that, it
+/// keeps 4:3 and narrows, centred.
 pub fn layout(size: [u32; 2], scale: f32, insets: [u32; 2]) -> Layout {
     let [w, h] = size;
     let top = insets[0].min(h);
     let bottom = insets[1].max((MIN_BOTTOM_POINTS * scale).round() as u32).min(h - top);
     let usable = h - top - bottom;
     // The panel never takes more than half the room, however large the scale.
-    let panel = ((PANEL_POINTS * scale).round() as u32).min(usable / 2);
-    let room = usable - panel;
+    let max_panel = ((PANEL_POINTS * scale).round() as u32).min(usable / 2);
+    let min_panel = ((MIN_PANEL_POINTS * scale).round() as u32).min(max_panel);
 
     // Even sizes keep the movement pass's 2 x 2 blocks whole at the edges.
     let mut sim_w = w & !1;
     let mut sim_h = (sim_w * 4 / 3) & !1;
+    let panel = usable.saturating_sub(sim_h).clamp(min_panel, max_panel);
+    let room = usable - panel;
     if sim_h > room {
         sim_h = room & !1;
         sim_w = (sim_h * 3 / 4) & !1;
@@ -67,6 +74,15 @@ mod tests {
         // The sim area sits right on the panel, and the panel on the gesture bar.
         assert_eq!(l.sim[1] + l.sim[3], l.panel_top);
         assert_eq!(l.panel_top + l.panel_height, 2404 - 63);
+    }
+
+    #[test]
+    fn a_status_bar_takes_panel_height_not_world_width() {
+        // A 136-pixel status bar and camera cutout on the same phone.
+        let l = layout([1080, 2404], 2.625, [136, 63]);
+        assert_eq!(l.sim, [0, 136, 1080, 1440]);
+        assert_eq!(l.panel_height, 2404 - 136 - 63 - 1440);
+        assert!(l.panel_height as f32 >= MIN_PANEL_POINTS * 2.625);
     }
 
     #[test]

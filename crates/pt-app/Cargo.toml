@@ -31,6 +31,7 @@ pollster.workspace = true
 egui-winit = { workspace = true, features = ["android-native-activity"] }
 winit = { workspace = true, features = ["android-native-activity"] }
 android_logger = "0.15"
+jni = "0.22"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger.workspace = true

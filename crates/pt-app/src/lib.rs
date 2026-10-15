@@ -123,6 +123,8 @@ struct Screen {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     egui_state: egui_winit::State,
+    /// System bar insets in pixels, once Android has reported them.
+    insets: Option<[u32; 2]>,
 }
 
 #[derive(Default)]
@@ -149,6 +151,7 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
             .with_max_level(log::LevelFilter::Info)
             .with_tag("powder-toy"),
     );
+    let _ = ANDROID_APP.set(android_app.clone());
     let event_loop = EventLoop::builder()
         .with_android_app(android_app)
         .build()
@@ -156,28 +159,97 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
     run(event_loop);
 }
 
-/// The layout for this window, kept clear of Android's status and gesture bars.
-fn screen_layout(window: &Window, size: [u32; 2]) -> Layout {
-    layout::layout(size, window.scale_factor() as f32, system_insets(window, size))
+/// The app handle, for asking Android about the window from Java.
+#[cfg(target_os = "android")]
+static ANDROID_APP: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> = std::sync::OnceLock::new();
+
+/// Status bar height in points assumed until Android reports the real one.
+#[cfg(target_os = "android")]
+const FALLBACK_TOP_POINTS: f32 = 48.0;
+#[cfg(not(target_os = "android"))]
+const FALLBACK_TOP_POINTS: f32 = 0.0;
+
+/// The layout for this window, kept clear of the status bar, camera cutout
+/// and gesture bar. `insets` are the measured ones, once known.
+fn screen_layout(window: &Window, size: [u32; 2], insets: Option<[u32; 2]>) -> Layout {
+    let scale = window.scale_factor() as f32;
+    let insets = insets.unwrap_or([(FALLBACK_TOP_POINTS * scale).round() as u32, 0]);
+    layout::layout(size, scale, insets)
 }
 
-/// Rows the status bar (top) and gesture bar (bottom) cover, from the content
-/// rectangle Android reports. Before Android reports one, nothing is reserved
-/// here and the layout's minimum bottom gap applies.
+/// Rows the status bar and camera cutout (top) and the gesture or navigation
+/// bar (bottom) cover, asked of the window's decor view. `None` until the
+/// view is attached, or if Java says no.
+///
+/// The app draws edge to edge (Android 15 enforces it), so the content
+/// rectangle NativeActivity reports is the whole screen and cannot be used.
 #[cfg(target_os = "android")]
-fn system_insets(window: &Window, size: [u32; 2]) -> [u32; 2] {
-    use winit::platform::android::WindowExtAndroid;
-    let r = window.content_rect();
-    if r.right > r.left && r.bottom > r.top {
-        [r.top.max(0) as u32, (size[1] as i32 - r.bottom).max(0) as u32]
-    } else {
-        [0, 0]
+fn system_insets() -> Option<[u32; 2]> {
+    use jni::objects::JObject;
+    use jni::refs::Global;
+    use jni::{jni_sig, jni_str};
+
+    let app = ANDROID_APP.get()?;
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    let query = |env: &mut jni::Env| -> jni::errors::Result<Option<[u32; 2]>> {
+        let raw = app.activity_as_ptr() as jni::sys::jobject;
+        // SAFETY: a global reference `app` owns, valid while `app` lives.
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw)? };
+        let window = env
+            .call_method(activity.as_ref(), jni_str!("getWindow"), jni_sig!("()Landroid/view/Window;"), &[])?
+            .l()?;
+        let decor = env
+            .call_method(&window, jni_str!("getDecorView"), jni_sig!("()Landroid/view/View;"), &[])?
+            .l()?;
+        let insets = env
+            .call_method(
+                &decor,
+                jni_str!("getRootWindowInsets"),
+                jni_sig!("()Landroid/view/WindowInsets;"),
+                &[],
+            )?
+            .l()?;
+        if insets.is_null() {
+            return Ok(None);
+        }
+        // Stable insets count the bars even while they are hidden; these
+        // calls exist on every Android the app supports (API 28 and up).
+        let mut top = env.call_method(&insets, jni_str!("getStableInsetTop"), jni_sig!("()I"), &[])?.i()?;
+        let bottom = env
+            .call_method(&insets, jni_str!("getStableInsetBottom"), jni_sig!("()I"), &[])?
+            .i()?;
+        let cutout = env
+            .call_method(
+                &insets,
+                jni_str!("getDisplayCutout"),
+                jni_sig!("()Landroid/view/DisplayCutout;"),
+                &[],
+            )?
+            .l()?;
+        if !cutout.is_null() {
+            top = top.max(env.call_method(&cutout, jni_str!("getSafeInsetTop"), jni_sig!("()I"), &[])?.i()?);
+        }
+        Ok(Some([top.max(0) as u32, bottom.max(0) as u32]))
+    };
+    let result = vm.attach_current_thread(|env| -> jni::errors::Result<Option<[u32; 2]>> {
+        let r = query(env);
+        if r.is_err() {
+            env.exception_clear();
+        }
+        Ok(r.unwrap_or(None))
+    });
+    match result {
+        Ok(insets) => insets,
+        Err(err) => {
+            log::warn!("could not read window insets: {err}");
+            None
+        }
     }
 }
 
 #[cfg(not(target_os = "android"))]
-fn system_insets(_window: &Window, _size: [u32; 2]) -> [u32; 2] {
-    [0, 0]
+fn system_insets() -> Option<[u32; 2]> {
+    Some([0, 0])
 }
 
 fn surface_config(surface: &wgpu::Surface<'_>, gpu: &Gpu, size: [u32; 2]) -> wgpu::SurfaceConfiguration {
@@ -267,7 +339,8 @@ impl ApplicationHandler for App {
             None,
             Some(engine.gpu.device.limits().max_texture_dimension_2d as usize),
         );
-        engine.layout = screen_layout(&window, [config.width, config.height]);
+        let insets = system_insets();
+        engine.layout = screen_layout(&window, [config.width, config.height], insets);
         if engine.world2d.is_none() {
             engine.new_world_2d(true);
         }
@@ -277,6 +350,7 @@ impl ApplicationHandler for App {
             surface,
             config,
             egui_state,
+            insets,
         });
     }
 
@@ -299,6 +373,7 @@ impl ApplicationHandler for App {
                 screen.config.width = size.width.max(1);
                 screen.config.height = size.height.max(1);
                 screen.surface.configure(&engine.gpu.device, &screen.config);
+                screen.insets = None;
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
@@ -483,7 +558,10 @@ impl Engine {
 
     fn frame(&mut self, screen: &mut Screen, pointers: &mut Pointers) {
         let size = [screen.config.width, screen.config.height];
-        self.layout = screen_layout(&screen.window, size);
+        if screen.insets.is_none() {
+            screen.insets = system_insets();
+        }
+        self.layout = screen_layout(&screen.window, size, screen.insets);
 
         // Get the surface before running the UI: skipping a frame after the UI
         // ran would drop its texture updates (the font atlas among them).

@@ -53,6 +53,8 @@ pub struct Settings {
     pub paused: bool,
     pub step_once: bool,
     pub temperature_view: bool,
+    /// Show the air flow over the 2D world.
+    pub wind_view: bool,
     pub substeps: u32,
     pub heat_speed: f32,
     pub size_3d: u32,
@@ -310,6 +312,7 @@ impl ApplicationHandler for App {
                 paused: false,
                 step_once: false,
                 temperature_view: false,
+                wind_view: false,
                 substeps: pt_sim2d::DEFAULT_SUBSTEPS,
                 heat_speed: 1.0,
                 size_3d: 128,
@@ -651,6 +654,8 @@ impl Engine {
                 w.sim.encode(&self.gpu.queue, &mut encoder, ticks);
                 let overlay = if self.settings.temperature_view {
                     Overlay::Temperature
+                } else if self.settings.wind_view {
+                    Overlay::Wind
                 } else {
                     Overlay::None
                 };

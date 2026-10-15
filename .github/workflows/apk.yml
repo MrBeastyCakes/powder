@@ -3,6 +3,8 @@ name: Android APK
 on:
   push:
     branches: [main]
+    # A version tag such as v0.1.0-alpha.1 publishes a release of its own.
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -63,7 +65,7 @@ jobs:
           name: powder-toy-next-apk
           path: powder-toy-next.apk
       - name: Publish as the "latest-apk" release
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.ref_type != 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -71,3 +73,18 @@ jobs:
           gh release create latest-apk powder-toy-next.apk --prerelease --target "$GITHUB_SHA" \
             --title "Latest APK" \
             --notes "Built from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}. Open this page on your Android phone and tap powder-toy-next.apk to install (allow installs from your browser when asked)."
+      - name: Publish the tagged release
+        # Notes come from release-notes/<tag>.md. A tag with a hyphen
+        # (alpha, beta, rc) is marked as a pre-release.
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          cp powder-toy-next.apk "powder-toy-next-$tag.apk"
+          pre=""
+          case "$tag" in *-*) pre="--prerelease" ;; esac
+          notes="release-notes/$tag.md"
+          [ -f "$notes" ] || { echo "Built from ${GITHUB_SHA::7}." > "$notes"; }
+          gh release create "$tag" "powder-toy-next-$tag.apk" $pre --latest=false --verify-tag \
+            --title "Powder Toy Next $tag" --notes-file "$notes"

@@ -26,21 +26,35 @@ jobs:
           java-version: "17"
       - name: Install cargo-apk
         run: cargo install cargo-apk --locked
-      - name: Debug signing key
-        # cargo-apk signs with the standard Android debug key. A fixed key
-        # lets each new build install over the last one.
+      - name: Signing key
+        # Every build must be signed with the same key, or Android refuses to
+        # install it over the last one and the app has to be uninstalled
+        # first, which deletes its saves. The key lives in two repository
+        # secrets: ANDROID_KEYSTORE_BASE64 (the keystore, base64-encoded) and
+        # ANDROID_KEYSTORE_PASSWORD. Without them (a fork, or before they are
+        # set up) the build makes a throwaway key and says so.
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           mkdir -p ~/.android
-          keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android \
-            -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > ~/.android/powder.keystore
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret: this APK has a throwaway key and will not install over an earlier build."
+            keytool -genkeypair -keystore ~/.android/powder.keystore -storepass android \
+              -alias powder -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Powder Toy Next test build"
+            echo "KEYSTORE_PASSWORD=android" >> "$GITHUB_ENV"
+          fi
       - name: Build APK
         run: |
           export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
-          # A test signing key, so the APK installs by sideloading. Not for a store.
-          export CARGO_APK_RELEASE_KEYSTORE="$HOME/.android/debug.keystore"
-          export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
+          # A sideloading key for test builds, not for a store.
+          export CARGO_APK_RELEASE_KEYSTORE="$HOME/.android/powder.keystore"
+          export CARGO_APK_RELEASE_KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
           cargo apk build -p pt-app --lib --release
           find target -name "*.apk" -path "*release*"
           cp target/release/apk/powder-toy-next.apk powder-toy-next.apk

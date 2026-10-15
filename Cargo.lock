@@ -1843,6 +1843,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "env_logger",
+ "jni",
  "log",
  "pollster",
  "pt-bench",

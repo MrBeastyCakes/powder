@@ -16,6 +16,13 @@ const MODE_COOL: u32 = 4u;
 @group(0) @binding(1) var<uniform> brush: Brush;
 @group(0) @binding(2) var<storage, read_write> cells: array<u32>;
 @group(0) @binding(3) var<storage, read_write> therm: array<vec2<f32>>;
+// The simulation's chunk marks (see sim2d.wgsl): painted chunks wake up.
+@group(0) @binding(4) var<storage, read_write> moved: array<atomic<u32>>;
+
+fn wake(x: i32, y: i32) {
+    let cw = (brush.width + 63u) / 64u;
+    atomicStore(&moved[(u32(y) / 64u) * cw + u32(x) / 64u], 1u);
+}
 
 fn segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     let ab = b - a;
@@ -44,12 +51,14 @@ fn paint(@builtin(global_invocation_id) gid: vec3<u32>) {
         case MODE_ERASE: {
             cells[i] = make_cell(0u, h >> 24u);
             therm[i] = vec2<f32>(20.0, 0.0);
+            wake(x, y);
         }
         default: {
             if (brush.mode == MODE_PAINT && current != 0u) { return; }
             if (rand01(h) >= brush.fill) { return; }
             cells[i] = make_cell(brush.mat, h >> 24u);
             therm[i] = vec2<f32>(brush.temp, 0.0);
+            wake(x, y);
         }
     }
 }

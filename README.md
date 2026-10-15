@@ -85,7 +85,6 @@ Done:
 Next:
 
 - First APK build on real hardware, then benchmarks on three Android phone tiers
-- Sleeping chunks (skip regions where nothing moves), the biggest expected speedup
 - Empty-space skipping for the 3D ray march
 - Magnifier loupe for 1-pixel precision under a finger
 - Faster movement at native resolution (see findings)
@@ -93,10 +92,13 @@ Next:
 ## Findings so far
 
 - **Movement speed at native resolution.** Cells move at most one cell per
-  movement pass. With 4 passes per tick, sand falls 240 pixels a second, so a
-  full phone-height drop takes about 10 seconds. More passes cost GPU time.
-  Velocity-based movement (the Phase 1 momentum layer) is the real fix and may
-  need to come earlier.
+  movement pass. Phase 1 raised the default from 4 to 16 passes per tick, so
+  sand falls about 860 pixels a second and crosses the 1,440-row sim area in
+  under 2 seconds (tested). Sleeping chunks pay for it where nothing moves: a
+  64 x 64 chunk skips its movement passes until something nearby moves, is
+  painted, or changes phase. Where everything moves, 16 passes cost about 2.7
+  times as much as 4 on the software GPU. Velocity per cell (falls that
+  accelerate, with fewer passes) is the next step.
 - **Hot air does not rise yet.** Heat moves with cells and by conduction only,
   so air heated by lava stays where it is. Buoyant hot air needs the Phase 1
   air layer.

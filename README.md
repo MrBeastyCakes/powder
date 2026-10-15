@@ -13,7 +13,7 @@ for every later phase can be chosen from measurements and playtests.
 | `crates/pt-core` | Loads and validates material packs, compiles them into the GPU table, and holds the WGSL both simulations share (heat, phase changes, reactions, color) |
 | `crates/pt-sim2d` | The 2D simulation and renderer (WGSL compute and fragment shaders) |
 | `crates/pt-sim3d` | The 3D voxel simulation, brush picking and ray-marched renderer |
-| `crates/pt-app` | The touch app: both prototypes behind one UI, with an on-device benchmark |
+| `crates/pt-app` | The touch app: an upright 4:3 sim area on a keyboard-height control panel, with an on-device benchmark. The 3D prototype is shelved and no longer offered in the app |
 | `crates/pt-bench` | The standard benchmark and a screenshot tool, runnable headless |
 | `mobile/android` | Android packaging (native Rust NativeActivity, Vulkan); see its README |
 
@@ -46,9 +46,8 @@ same app also runs in a desktop window:
 cargo run --release -p pt-app
 ```
 
-Left-drag paints, the mouse wheel changes the brush (2D) or zooms (3D), and
-right-drag turns the 3D camera. On a phone, one finger paints, pinch changes
-the brush in 2D, and two fingers turn and zoom the camera in 3D.
+Left-drag paints and the mouse wheel changes the brush. On a phone, one
+finger paints and pinch changes the brush.
 
 Tests (they need a Vulkan device; on a machine without a GPU, install
 `mesa-vulkan-drivers` for the lavapipe software device):

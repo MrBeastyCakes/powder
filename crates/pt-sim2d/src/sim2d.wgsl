@@ -6,6 +6,13 @@
 // block grid shifts by one cell between passes so material can cross block
 // edges. No two threads touch the same cell, so there are no locks.
 //
+// Falling: before the block passes, one thread per column walks the column
+// bottom to top and drops every unsupported grain or drop of liquid through
+// the air below it, as far as its velocity carries it. Velocity lives in the
+// cell's bits 16 to 23, in eighths of a cell per tick, and grows by GRAVITY
+// each tick the cell falls freely, so falls accelerate. The block passes
+// still do sinking through liquids, sliding, spreading and rising gas.
+//
 // Sleeping chunks: the world is also cut into 64 x 64 chunks. Any pass that
 // moves a cell, or could have moved one but lost the dice roll, marks its
 // chunk in `moved`. At the end of each tick `settle` wakes every chunk next
@@ -33,6 +40,12 @@ struct Params {
 @group(0) @binding(7) var<storage, read_write> awake: array<u32>;
 
 const CHUNK: u32 = 64u;
+// Velocity units are eighths of a cell per tick.
+const GRAVITY: u32 = 3u;
+const MAX_FALL: u32 = 160u;
+
+fn vel_of(cell: u32) -> u32 { return (cell >> 16u) & 0xffu; }
+fn with_vel(cell: u32, v: u32) -> u32 { return (cell & 0xff00ffffu) | (v << 16u); }
 
 fn idx(x: u32, y: u32) -> u32 { return y * params.width + x; }
 
@@ -72,11 +85,67 @@ fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
     var s = CellState(mat, th.x + flux / materials.m[mat].heat_capacity, th.y);
     s = resolve_phase(s);
     s = react(s, touches_air, hash3(i, params.tick, params.seed));
-    cells_out[i] = make_cell(s.mat, shade_of(cell));
+    // A cell that changes material starts at rest; otherwise it keeps its speed.
+    cells_out[i] = select(make_cell(s.mat, shade_of(cell)), with_vel(make_cell(s.mat, shade_of(cell)), vel_of(cell)), s.mat == mat);
     therm_out[i] = vec2<f32>(s.temp, s.latent);
     // A phase change or reaction can set still material moving (ice melts).
     if (s.mat != mat) {
         mark(chunk_of(gid.x, gid.y));
+    }
+}
+
+@compute @workgroup_size(64)
+fn fall(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    if (x >= params.width) { return; }
+    let h = i32(params.height);
+    // The lowest air cell in the run of air directly below the current cell,
+    // or -1 when the cell below is not air.
+    var space = -1;
+    var y = h - 1;
+    loop {
+        if (y < 0) { break; }
+        // Skip sleeping chunks a whole chunk at a time.
+        if (y == h - 1 || u32(y) % CHUNK == CHUNK - 1u) {
+            if (awake[chunk_of(x, u32(y))] == 0u) {
+                y = i32((u32(y) / CHUNK) * CHUNK) - 1;
+                space = -1;
+                continue;
+            }
+        }
+        let i = idx(x, u32(y));
+        let c = cells_out[i];
+        let k = kind_of(mat_of(c));
+        if (k == KIND_EMPTY) {
+            if (space < 0) { space = y; }
+        } else if ((k == KIND_POWDER || k == KIND_LIQUID) && space > y) {
+            let v = min(vel_of(c) + GRAVITY, MAX_FALL);
+            // Round v / 8 up or down at random, in proportion, so slow cells
+            // still creep down on average at the right speed.
+            let dist = i32((v + (hash3(i, params.tick, params.seed ^ 0xfa11u) & 7u)) >> 3u);
+            if (dist == 0) {
+                cells_out[i] = with_vel(c, v);
+                space = -1;
+            } else {
+                let land = min(y + dist, space);
+                // Stopped short by something: the fall ends here.
+                let nv = select(v, 0u, y + dist > space);
+                let j = idx(x, u32(land));
+                let t = therm_out[i];
+                cells_out[i] = cells_out[j];
+                therm_out[i] = therm_out[j];
+                cells_out[j] = with_vel(c, nv);
+                therm_out[j] = t;
+                mark(chunk_of(x, u32(y)));
+                mark(chunk_of(x, u32(land)));
+                space = land - 1;
+            }
+        } else {
+            // Resting on something: no speed left.
+            if (vel_of(c) != 0u) { cells_out[i] = with_vel(c, 0u); }
+            space = -1;
+        }
+        y -= 1;
     }
 }
 
@@ -168,13 +237,17 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
     let r = 1u - l;
     let cols = array<u32, 2>(l, r);
 
-    // 1. Fall: anything denser sinks through what is below it, faster the
-    //    bigger the density difference (sand drops through air, stone sinks
+    // 1. Sink: anything denser sinks through liquid or gas below it, faster the
+    //    bigger the density difference (sand drops through water, stone sinks
     //    slowly through lava, warm fire drifts up rather than shooting up).
     for (var c = 0u; c < 2u; c++) {
         let top = cols[c];
         let bot = top + 2u;
-        let sinks = heavier(blk_mat[top], blk_mat[bot]);
+        // Grains and liquids falling through air belong to the fall pass,
+        // which accelerates them.
+        let kt = kind_of(blk_mat[top]);
+        let free_fall = (kt == KIND_POWDER || kt == KIND_LIQUID) && kind_of(blk_mat[bot]) == KIND_EMPTY;
+        let sinks = heavier(blk_mat[top], blk_mat[bot]) && !free_fall;
         busy = busy || sinks;
         if (sinks && rand01(pcg(h + c)) < sink_chance(blk_mat[top], blk_mat[bot])) {
             swap_cells(top, bot);

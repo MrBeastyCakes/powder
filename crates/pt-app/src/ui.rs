@@ -59,9 +59,9 @@ const MUTED: Color32 = Color32::from_rgb(0x9a, 0xa0, 0xad);
 const DIM: Color32 = Color32::from_rgb(0x8b, 0x92, 0xa0);
 const ACCENT: Color32 = Color32::from_rgb(0xff, 0xb0, 0x30);
 
-/// Movement passes per tick the speed keys step through. 16 is normal
+/// Block movement passes per tick the speed keys step through. 8 is normal
 /// speed (see `pt_sim2d::DEFAULT_SUBSTEPS`).
-const SPEEDS: [u32; 5] = [4, 8, 16, 24, 32];
+const SPEEDS: [u32; 5] = [2, 4, 8, 12, 16];
 const SPEED_LABELS: [&str; 5] = ["¼×", "½×", "1×", "1½×", "2×"];
 /// Height of the top strip, its bottom rule included.
 const STRIP_H: f32 = 53.0;

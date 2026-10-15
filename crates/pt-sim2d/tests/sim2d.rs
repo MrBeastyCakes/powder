@@ -330,3 +330,29 @@ fn melting_wakes_a_sleeping_chunk() {
     let column_top = &cells[(45 * 128) as usize..(46 * 128) as usize];
     assert_eq!(count(column_top, water), 0, "melted water should flow out, not stand still");
 }
+
+#[test]
+fn falls_accelerate() {
+    // A grain dropped from rest covers less than half as far in its first 30
+    // ticks as in its first 60; at a constant speed it would be exactly half.
+    let gpu = gpu();
+    let t = MaterialTable::core();
+    let sand = t.expect_id("sand");
+    let (wd, ht) = (64, 1440);
+    let mut w = World::new(wd, ht);
+    w.fill(32, 0, 33, 1, sand, 20.0);
+    let mut sim = w.sim(&gpu, &t, 4);
+    let depth = |sim: &Sim2d| {
+        let cells = sim.read_cells(&gpu);
+        cells.iter().position(|&c| c & 0xff == sand).map(|i| i as u32 / wd).unwrap()
+    };
+    sim.run(&gpu, 30);
+    let d30 = depth(&sim);
+    sim.run(&gpu, 30);
+    let d60 = depth(&sim);
+    assert!(d30 > 0 && d60 > d30, "the grain should be falling: {d30}, {d60}");
+    assert!(
+        d30 * 10 < d60 * 4,
+        "falls should speed up: {d30} rows after 30 ticks, {d60} after 60"
+    );
+}

@@ -1,8 +1,10 @@
 //! Powder Toy Next, Phase 0 app: the 2D and 3D prototypes behind one touch UI.
 //!
 //! The target is Android (`android_main`, a Rust NativeActivity). The same
-//! code also runs as a desktop window (`run` from `main.rs`) for development. The world is created at the screen's native resolution,
-//! one cell per pixel, the first time a window appears.
+//! code also runs as a desktop window (`run` from `main.rs`) for development.
+//! The screen is an upright 4:3 sim area, one cell per pixel, on a control
+//! panel about as tall as a keyboard (see `layout`). The 3D prototype is
+//! shelved: its code stays, but the app no longer offers it.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,7 +19,10 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, Wind
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+mod layout;
 mod ui;
+
+use layout::Layout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -108,6 +113,8 @@ struct Engine {
     stats: ui::Stats,
     /// Screen rectangles (physical pixels) the UI covered last frame.
     ui_rects: Vec<egui::Rect>,
+    /// This frame's screen layout.
+    layout: Layout,
 }
 
 /// The window and its surface; recreated on every resume.
@@ -147,6 +154,30 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
         .build()
         .expect("create event loop");
     run(event_loop);
+}
+
+/// The layout for this window, kept clear of Android's status and gesture bars.
+fn screen_layout(window: &Window, size: [u32; 2]) -> Layout {
+    layout::layout(size, window.scale_factor() as f32, system_insets(window, size))
+}
+
+/// Rows the status bar (top) and gesture bar (bottom) cover, from the content
+/// rectangle Android reports. Before Android reports one, nothing is reserved
+/// here and the layout's minimum bottom gap applies.
+#[cfg(target_os = "android")]
+fn system_insets(window: &Window, size: [u32; 2]) -> [u32; 2] {
+    use winit::platform::android::WindowExtAndroid;
+    let r = window.content_rect();
+    if r.right > r.left && r.bottom > r.top {
+        [r.top.max(0) as u32, (size[1] as i32 - r.bottom).max(0) as u32]
+    } else {
+        [0, 0]
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn system_insets(_window: &Window, _size: [u32; 2]) -> [u32; 2] {
+    [0, 0]
 }
 
 fn surface_config(surface: &wgpu::Surface<'_>, gpu: &Gpu, size: [u32; 2]) -> wgpu::SurfaceConfiguration {
@@ -216,6 +247,7 @@ impl ApplicationHandler for App {
                 format,
                 stats,
                 ui_rects: vec![],
+                layout: layout::layout([size.width, size.height], window.scale_factor() as f32, [0, 0]),
             });
         }
         let engine = self.engine.as_mut().unwrap();
@@ -235,8 +267,9 @@ impl ApplicationHandler for App {
             None,
             Some(engine.gpu.device.limits().max_texture_dimension_2d as usize),
         );
+        engine.layout = screen_layout(&window, [config.width, config.height]);
         if engine.world2d.is_none() {
-            engine.new_world_2d([config.width, config.height], true);
+            engine.new_world_2d(true);
         }
         window.request_redraw();
         self.screen = Some(Screen {
@@ -411,7 +444,9 @@ impl Pointers {
 }
 
 impl Engine {
-    fn new_world_2d(&mut self, size: [u32; 2], demo: bool) {
+    /// A new 2D world the size of the layout's sim area.
+    fn new_world_2d(&mut self, demo: bool) {
+        let size = [self.layout.sim[2].max(2), self.layout.sim[3].max(2)];
         let mut sim = Sim2d::new(&self.gpu, self.table.clone(), size[0], size[1], 0x5eed);
         if demo {
             let scene = pt_sim2d::scenes::demo(&self.table, size[0], size[1], 1);
@@ -448,11 +483,23 @@ impl Engine {
 
     fn frame(&mut self, screen: &mut Screen, pointers: &mut Pointers) {
         let size = [screen.config.width, screen.config.height];
+        self.layout = screen_layout(&screen.window, size);
+
+        // Get the surface before running the UI: skipping a frame after the UI
+        // ran would drop its texture updates (the font atlas among them).
+        let frame = match screen.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                screen.surface.configure(&self.gpu.device, &screen.config);
+                return;
+            }
+            _ => return,
+        };
 
         // UI first, so this frame's input knows where the UI is.
         let raw_input = screen.egui_state.take_egui_input(&screen.window);
         let mut actions = ui::Actions::default();
-        let output = self.egui_ctx.clone().run_ui(raw_input, |ui| {
+        let mut output = self.egui_ctx.clone().run_ui(raw_input, |ui| {
             actions = ui::draw(ui, self);
         });
         screen
@@ -464,7 +511,7 @@ impl Engine {
             .iter()
             .map(|r| egui::Rect::from_min_max((r.min.to_vec2() * ppp).to_pos2(), (r.max.to_vec2() * ppp).to_pos2()))
             .collect();
-        self.apply(actions, size);
+        self.apply(actions);
         if self.settings.mode == Mode::ThreeD && self.world3d.is_none() {
             self.new_world_3d(self.settings.size_3d, true);
             if self.world3d.is_none() {
@@ -483,23 +530,18 @@ impl Engine {
             pointers.paint = Some((id, p));
         }
 
-        let frame = match screen.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                screen.surface.configure(&self.gpu.device, &screen.config);
-                return;
-            }
-            _ => return,
-        };
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
 
         match self.settings.mode {
             Mode::TwoD => {
                 let w = self.world2d.as_mut().expect("2D world exists");
+                // The world fills the sim area; one made for a different
+                // screen sits centred in it.
+                let [sx, sy, sw, sh] = self.layout.sim;
                 let offset = [
-                    (size[0] as i32 - w.sim.width as i32) / 2,
-                    (size[1] as i32 - w.sim.height as i32) / 2,
+                    sx as i32 + (sw as i32 - w.sim.width as i32) / 2,
+                    sy as i32 + (sh as i32 - w.sim.height as i32) / 2,
                 ];
                 if let Some((_, last, p)) = paint_pos {
                     let to_world = |q: [f32; 2]| [q[0] - offset[0] as f32, q[1] - offset[1] as f32];
@@ -582,44 +624,31 @@ impl Engine {
         for id in &output.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
+        // Every delta is applied above; clearing says so (egui checks in debug builds).
+        output.textures_delta.clear();
         self.gpu.queue.submit(extra.into_iter().chain([encoder.finish()]));
         screen.window.pre_present_notify();
         self.gpu.queue.present(frame);
     }
 
-    fn apply(&mut self, actions: ui::Actions, screen_size: [u32; 2]) {
+    fn apply(&mut self, actions: ui::Actions) {
         if let Some(demo) = actions.new_2d {
             self.world2d = None;
-            self.new_world_2d(screen_size, demo);
-        }
-        if let Some(demo) = actions.new_3d {
-            self.new_world_3d(self.settings.size_3d, demo);
-            if self.world3d.is_none() && self.settings.mode == Mode::ThreeD {
-                self.settings.mode = Mode::TwoD;
-            }
+            self.new_world_2d(demo);
         }
         if actions.bench {
-            self.run_benchmark(screen_size);
+            self.run_benchmark();
         }
     }
 
-    /// The same measurement as `pt-bench`, on this device: the 2D world at
-    /// this screen's size and the 3D world at several sizes.
-    fn run_benchmark(&mut self, screen_size: [u32; 2]) {
-        let mut results = vec![pt_bench::bench_2d(&self.gpu, &self.table, screen_size[0], screen_size[1], 120)];
-        // Make room for the large 3D worlds.
-        let had_3d = self.world3d.is_some();
-        self.world3d = None;
-        for n in [64, 128, 192, 256] {
-            if let Some(r) = pt_bench::bench_3d(&self.gpu, &self.table, n, 30) {
-                results.push(r);
-            }
-        }
+    /// The same 2D measurement as `pt-bench`, on this device, at the size of
+    /// this screen's sim area. (The 3D prototype is shelved, so it is not
+    /// measured here; `pt-bench` still covers it.)
+    fn run_benchmark(&mut self) {
+        let [_, _, w, h] = self.layout.sim;
+        let results = vec![pt_bench::bench_2d(&self.gpu, &self.table, w.max(2), h.max(2), 120)];
         let report = pt_bench::table(&self.gpu.adapter_name(), &results);
         log::info!("benchmark\n{report}");
         self.stats.bench = Some(report);
-        if had_3d {
-            self.new_world_3d(self.settings.size_3d, true);
-        }
     }
 }

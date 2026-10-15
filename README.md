@@ -91,14 +91,15 @@ Next:
 
 ## Findings so far
 
-- **Movement speed at native resolution.** Cells move at most one cell per
-  movement pass. Phase 1 raised the default from 4 to 16 passes per tick, so
-  sand falls about 860 pixels a second and crosses the 1,440-row sim area in
-  under 2 seconds (tested). Sleeping chunks pay for it where nothing moves: a
-  64 x 64 chunk skips its movement passes until something nearby moves, is
-  painted, or changes phase. Where everything moves, 16 passes cost about 2.7
-  times as much as 4 on the software GPU. Velocity per cell (falls that
-  accelerate, with fewer passes) is the next step.
+- **Movement speed at native resolution.** The block passes move a cell at
+  most one cell per pass, so free falls now have a pass of their own: one
+  thread per column drops each unsupported grain or drop through the air
+  below it as far as its velocity carries it, and the velocity (stored in the
+  cell) grows every tick it falls, so falls accelerate. Dropped sand crosses
+  the 1,440-row sim area in about 1.6 seconds (tested under 2). The 8 block
+  passes per tick handle sinking through liquids, sliding and spreading.
+  Sleeping chunks skip all of it where nothing moves: a 64 x 64 chunk sleeps
+  until something nearby moves, is painted, or changes phase.
 - **Hot air does not rise yet.** Heat moves with cells and by conduction only,
   so air heated by lava stays where it is. Buoyant hot air needs the Phase 1
   air layer.

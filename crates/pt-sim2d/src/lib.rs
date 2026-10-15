@@ -17,10 +17,10 @@ const PARAM_SLOTS: u64 = 128;
 /// Side of a sleeping chunk in cells; matches `CHUNK` in sim2d.wgsl.
 pub const CHUNK: u32 = 64;
 
-/// Movement passes per tick unless the player changes it. A falling grain
-/// moves at most one cell per pass, so 16 passes at 60 ticks a second drop
-/// sand through a 1,440-cell sim area in under 2 seconds.
-pub const DEFAULT_SUBSTEPS: u32 = 16;
+/// Block movement passes per tick unless the player changes it. Free falls
+/// run in their own pass; these set how fast liquids spread, grains slide
+/// and things sink through liquids, at most one cell per pass.
+pub const DEFAULT_SUBSTEPS: u32 = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -93,6 +93,7 @@ pub struct Sim2d {
     paint_groups: [wgpu::BindGroup; 2],
     heat_pipe: wgpu::ComputePipeline,
     move_pipe: wgpu::ComputePipeline,
+    fall_pipe: wgpu::ComputePipeline,
     settle_pipe: wgpu::ComputePipeline,
     reset_pipe: wgpu::ComputePipeline,
     paint_pipe: wgpu::ComputePipeline,
@@ -218,6 +219,7 @@ impl Sim2d {
             move_substeps: DEFAULT_SUBSTEPS,
             heat_pipe: compute_pipeline(device, &step_pl, &sim_module, "heat"),
             move_pipe: compute_pipeline(device, &step_pl, &sim_module, "move_blocks"),
+            fall_pipe: compute_pipeline(device, &step_pl, &sim_module, "fall"),
             settle_pipe: compute_pipeline(device, &step_pl, &sim_module, "settle"),
             reset_pipe: compute_pipeline(device, &step_pl, &sim_module, "reset"),
             paint_pipe: compute_pipeline(device, &paint_pl, &paint_module, "paint"),
@@ -332,6 +334,8 @@ impl Sim2d {
             pass.set_pipeline(&self.heat_pipe);
             pass.set_bind_group(0, group, &[slot * UNIFORM_SLOT as u32]);
             pass.dispatch_workgroups(cells_x, cells_y, 1);
+            pass.set_pipeline(&self.fall_pipe);
+            pass.dispatch_workgroups(self.width.div_ceil(64), 1, 1);
             slot += 1;
             pass.set_pipeline(&self.move_pipe);
             for _ in 0..self.move_substeps {

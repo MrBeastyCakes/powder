@@ -176,6 +176,10 @@ fn screenshots(gpu: &Gpu, table: &MaterialTable, dir: &Path) {
     renderer.draw(&gpu.queue, &mut encoder, &view, &sim, [0, 0], Overlay::Temperature);
     gpu.queue.submit([encoder.finish()]);
     save(gpu, &tex, &dir.join("2d-temperature.png"));
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    renderer.draw(&gpu.queue, &mut encoder, &view, &sim, [0, 0], Overlay::Wind);
+    gpu.queue.submit([encoder.finish()]);
+    save(gpu, &tex, &dir.join("2d-wind.png"));
 
     // 3D: a 128-cubed world seen from the default camera.
     let dims = [128, 128, 128];

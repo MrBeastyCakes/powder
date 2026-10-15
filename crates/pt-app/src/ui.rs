@@ -447,7 +447,7 @@ fn list(ui: &mut egui::Ui, table: &pt_core::MaterialTable, s: &mut Settings) {
 
 fn tool_rows(ui: &mut egui::Ui, s: &mut Settings) {
     // Heat, cool and erase replace painting until a material is picked (or
-    // the tool is tapped again); Over and Temp view are toggles.
+    // the tool is tapped again); Over and the views are toggles.
     let brushes = [
         (ToolKind::Heat, Icon::Heat, "Heat", "raises temperature under the brush"),
         (ToolKind::Cool, Icon::Cool, "Cool", "lowers temperature under the brush"),
@@ -464,6 +464,11 @@ fn tool_rows(ui: &mut egui::Ui, s: &mut Settings) {
     }
     if tool_row(ui, s.temperature_view, Icon::Temp, "Temp view", "toggle · show the heat map").clicked() {
         s.temperature_view = !s.temperature_view;
+        s.wind_view = false;
+    }
+    if tool_row(ui, s.wind_view, Icon::Wind, "Wind view", "toggle · show the air flow").clicked() {
+        s.wind_view = !s.wind_view;
+        s.temperature_view = false;
     }
 }
 
@@ -606,6 +611,7 @@ enum Icon {
     Erase,
     Over,
     Temp,
+    Wind,
 }
 
 /// Points on a circle from `a0` to `a1` degrees (y down, so 90 is straight down).
@@ -697,6 +703,11 @@ fn paint_icon(p: &Painter, icon: Icon, c: Pos2, size: f32, color: Color32) {
             lens.extend(arc((9.0, 3.0), 9.0, 36.0, 144.0));
             closed(&lens);
             circle((9.0, 9.0), 2.0);
+        }
+        Icon::Wind => {
+            open(&[(2.0, 5.0), (11.0, 5.0), (13.5, 3.5), (13.0, 1.5)]);
+            open(&[(2.0, 9.0), (15.0, 9.0), (17.0, 7.5), (16.5, 5.5)]);
+            open(&[(2.0, 13.0), (10.0, 13.0), (12.5, 14.5), (12.0, 16.5)]);
         }
         Icon::Tag => {
             closed(&[(2.5, 9.5), (2.5, 2.5), (9.5, 2.5), (16.0, 9.0), (9.0, 16.0)]);

@@ -22,6 +22,14 @@ pub const CHUNK: u32 = 64;
 /// and things sink through liquids, at most one cell per pass.
 pub const DEFAULT_SUBSTEPS: u32 = 8;
 
+/// Side of an air cell in world cells; matches `AIR_CELL` in air2d.wgsl.
+pub const AIR_CELL: u32 = 4;
+
+/// Pressure-solve iterations per tick. Even, so the result lands back in the
+/// first pressure buffer. The solve starts from last tick's pressure, so a
+/// few iterations a tick are enough to keep up.
+const JACOBI_ITERS: u32 = 16;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
@@ -32,7 +40,16 @@ struct Params {
     offset: u32,
     salt: u32,
     heat_speed: f32,
-    _pad: u32,
+    substeps: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct AirParams {
+    width: u32,
+    height: u32,
+    aw: u32,
+    ah: u32,
 }
 
 #[repr(C)]
@@ -84,6 +101,10 @@ pub struct Sim2d {
     moved: wgpu::Buffer,
     /// Per chunk: movement passes run there this tick.
     awake: wgpu::Buffer,
+    /// The air grid's velocities, densities and scratch (see air2d.wgsl).
+    air: wgpu::Buffer,
+    /// Air pressure, ping-ponged by the pressure solve; [0] holds the latest.
+    pressure: [wgpu::Buffer; 2],
     params: wgpu::Buffer,
     brush: wgpu::Buffer,
     /// Index of the buffer pair holding the latest state.
@@ -91,6 +112,9 @@ pub struct Sim2d {
 
     step_groups: [wgpu::BindGroup; 2],
     paint_groups: [wgpu::BindGroup; 2],
+    /// Indexed by the current cell buffer, then by which pressure buffer is read.
+    air_groups: [[wgpu::BindGroup; 2]; 2],
+    air_pipes: AirPipes,
     heat_pipe: wgpu::ComputePipeline,
     move_pipe: wgpu::ComputePipeline,
     fall_pipe: wgpu::ComputePipeline,
@@ -118,6 +142,15 @@ impl Sim2d {
         let chunk_count = (width.div_ceil(CHUNK) * height.div_ceil(CHUNK)) as u64;
         let moved = make("chunks moved", chunk_count * 4);
         let awake = make("chunks awake", chunk_count * 4);
+        let [aw, ah] = [width.div_ceil(AIR_CELL), height.div_ceil(AIR_CELL)];
+        let air_floats = air_len(aw, ah);
+        let air = make("air", air_floats * 4);
+        let pressure = [make("pressure a", (aw * ah) as u64 * 4), make("pressure b", (aw * ah) as u64 * 4)];
+        let air_params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("air params"),
+            contents: bytemuck::bytes_of(&AirParams { width, height, aw, ah }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         let materials = material_buffer(device, &table);
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sim2d params"),
@@ -140,6 +173,20 @@ impl Sim2d {
                 layout::storage(3, S::COMPUTE, true),
                 layout::storage(4, S::COMPUTE, false),
                 layout::storage(5, S::COMPUTE, false),
+                layout::storage(6, S::COMPUTE, false),
+                layout::storage(7, S::COMPUTE, false),
+                layout::storage(8, S::COMPUTE, true),
+            ],
+        });
+        let air_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("air2d"),
+            entries: &[
+                layout::uniform(0, S::COMPUTE, false),
+                layout::uniform(1, S::COMPUTE, false),
+                layout::storage(2, S::COMPUTE, true),
+                layout::storage(3, S::COMPUTE, true),
+                layout::storage(4, S::COMPUTE, false),
+                layout::storage(5, S::COMPUTE, true),
                 layout::storage(6, S::COMPUTE, false),
                 layout::storage(7, S::COMPUTE, false),
             ],
@@ -174,7 +221,26 @@ impl Sim2d {
                     entry(5, therm[dst].as_entire_binding()),
                     entry(6, moved.as_entire_binding()),
                     entry(7, awake.as_entire_binding()),
+                    entry(8, air.as_entire_binding()),
                 ],
+            })
+        });
+        let air_groups = [0usize, 1].map(|c| {
+            [0usize, 1].map(|p| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("air2d"),
+                    layout: &air_layout,
+                    entries: &[
+                        entry(0, materials.as_entire_binding()),
+                        entry(1, air_params.as_entire_binding()),
+                        entry(2, cells[c].as_entire_binding()),
+                        entry(3, therm[c].as_entire_binding()),
+                        entry(4, air.as_entire_binding()),
+                        entry(5, pressure[p].as_entire_binding()),
+                        entry(6, pressure[1 - p].as_entire_binding()),
+                        entry(7, moved.as_entire_binding()),
+                    ],
+                })
             })
         });
         let paint_groups = [0usize, 1].map(|i| {
@@ -195,6 +261,24 @@ impl Sim2d {
             label: Some("sim2d"),
             source: wgpu::ShaderSource::Wgsl(shader_source(include_str!("sim2d.wgsl")).into()),
         });
+        let air_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("air2d"),
+            source: wgpu::ShaderSource::Wgsl(shader_source(include_str!("air2d.wgsl")).into()),
+        });
+        let air_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("air2d"),
+            bind_group_layouts: &[Some(&air_layout)],
+            immediate_size: 0,
+        });
+        let air_pipe = |name| compute_pipeline(device, &air_pl, &air_module, name);
+        let air_pipes = AirPipes {
+            gather: air_pipe("gather"),
+            hydro: air_pipe("hydro"),
+            advect: air_pipe("advect"),
+            divergence: air_pipe("divergence"),
+            jacobi: air_pipe("jacobi"),
+            project: air_pipe("project"),
+        };
         let paint_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("paint2d"),
             source: wgpu::ShaderSource::Wgsl(shader_source(include_str!("paint2d.wgsl")).into()),
@@ -223,6 +307,10 @@ impl Sim2d {
             settle_pipe: compute_pipeline(device, &step_pl, &sim_module, "settle"),
             reset_pipe: compute_pipeline(device, &step_pl, &sim_module, "reset"),
             paint_pipe: compute_pipeline(device, &paint_pl, &paint_module, "paint"),
+            air_groups,
+            air_pipes,
+            air,
+            pressure,
             table,
             materials,
             cells,
@@ -249,6 +337,11 @@ impl Sim2d {
         [self.width.div_ceil(CHUNK), self.height.div_ceil(CHUNK)]
     }
 
+    /// The air grid's size in air cells.
+    pub fn air_dims(&self) -> [u32; 2] {
+        [self.width.div_ceil(AIR_CELL), self.height.div_ceil(AIR_CELL)]
+    }
+
     /// Fills the world with air at room temperature.
     pub fn clear(&self, gpu: &Gpu) {
         let n = self.cell_count() as usize;
@@ -264,6 +357,12 @@ impl Sim2d {
         let therm: Vec<[f32; 2]> = temps.iter().map(|&t| [t, 0.0]).collect();
         gpu.queue.write_buffer(&self.cells[self.current], 0, bytemuck::cast_slice(cells));
         gpu.queue.write_buffer(&self.therm[self.current], 0, bytemuck::cast_slice(&therm));
+        // A new world starts with still air.
+        let [aw, ah] = self.air_dims();
+        gpu.queue.write_buffer(&self.air, 0, &vec![0u8; air_len(aw, ah) as usize * 4]);
+        for p in &self.pressure {
+            gpu.queue.write_buffer(p, 0, &vec![0u8; (aw * ah) as usize * 4]);
+        }
         self.wake_all(gpu);
     }
 
@@ -313,7 +412,7 @@ impl Sim2d {
                     offset: (tick.wrapping_add(s)) & 1,
                     salt: s.wrapping_mul(0x9e37_79b9),
                     heat_speed: self.heat_speed,
-                    _pad: 0,
+                    substeps: self.move_substeps,
                 });
             }
         }
@@ -324,12 +423,33 @@ impl Sim2d {
         let blocks_x = (self.width / 2 + 1).div_ceil(8);
         let blocks_y = (self.height / 2 + 1).div_ceil(8);
         let [cw, ch] = self.chunk_dims();
+        let [aw, ah] = self.air_dims();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("sim2d"),
             timestamp_writes: None,
         });
         let mut slot = 0u32;
         for _ in 0..ticks {
+            let ap = &self.air_pipes;
+            let air = &self.air_groups[self.current];
+            pass.set_bind_group(0, &air[0], &[]);
+            pass.set_pipeline(&ap.gather);
+            pass.dispatch_workgroups(aw.div_ceil(8), ah.div_ceil(8), 1);
+            pass.set_pipeline(&ap.hydro);
+            pass.dispatch_workgroups(aw.div_ceil(64), 1, 1);
+            pass.set_pipeline(&ap.advect);
+            pass.dispatch_workgroups((aw + 1).div_ceil(8), (ah + 1).div_ceil(8), 1);
+            pass.set_pipeline(&ap.divergence);
+            pass.dispatch_workgroups(aw.div_ceil(8), ah.div_ceil(8), 1);
+            pass.set_pipeline(&ap.jacobi);
+            for k in 0..JACOBI_ITERS as usize {
+                pass.set_bind_group(0, &air[k & 1], &[]);
+                pass.dispatch_workgroups(aw.div_ceil(8), ah.div_ceil(8), 1);
+            }
+            pass.set_bind_group(0, &air[0], &[]);
+            pass.set_pipeline(&ap.project);
+            pass.dispatch_workgroups((aw + 1).div_ceil(8), (ah + 1).div_ceil(8), 1);
+
             let group = &self.step_groups[self.current];
             pass.set_pipeline(&self.heat_pipe);
             pass.set_bind_group(0, group, &[slot * UNIFORM_SLOT as u32]);
@@ -418,6 +538,26 @@ impl Sim2d {
         raw.into_iter().map(|a| a != 0).collect()
     }
 
+    /// Reads the air flow back, in world cells per tick, one vector per air
+    /// cell (the mean of its faces), row by row. Slow.
+    pub fn read_wind(&self, gpu: &Gpu) -> Vec<[f32; 2]> {
+        let [aw, ah] = self.air_dims();
+        let nu = ((aw + 1) * ah) as usize;
+        let nv = (aw * (ah + 1)) as usize;
+        let raw: Vec<f32> = gpu.read_buffer(&self.air, 0, nu + nv);
+        let (u, v) = raw.split_at(nu);
+        let (aw, ah) = (aw as usize, ah as usize);
+        let s = AIR_CELL as f32 * 0.5;
+        (0..ah)
+            .flat_map(|j| (0..aw).map(move |i| (i, j)))
+            .map(|(i, j)| {
+                let x = u[j * (aw + 1) + i] + u[j * (aw + 1) + i + 1];
+                let y = v[j * aw + i] + v[(j + 1) * aw + i];
+                [x * s, y * s]
+            })
+            .collect()
+    }
+
     /// Reads the current cells back. Slow.
     pub fn read_cells(&self, gpu: &Gpu) -> Vec<u32> {
         gpu.read_buffer(&self.cells[self.current], 0, self.cell_count() as usize)
@@ -448,6 +588,22 @@ impl Sim2d {
     }
 }
 
+struct AirPipes {
+    gather: wgpu::ComputePipeline,
+    hydro: wgpu::ComputePipeline,
+    advect: wgpu::ComputePipeline,
+    divergence: wgpu::ComputePipeline,
+    jacobi: wgpu::ComputePipeline,
+    project: wgpu::ComputePipeline,
+}
+
+/// Floats in the `air` buffer for an `aw` x `ah` air grid: U, V, U2, V2, then
+/// density, column weight and divergence per air cell.
+fn air_len(aw: u32, ah: u32) -> u64 {
+    let faces = ((aw + 1) * ah + aw * (ah + 1)) as u64;
+    2 * faces + 3 * (aw * ah) as u64
+}
+
 fn entry(binding: u32, resource: wgpu::BindingResource<'_>) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry { binding, resource }
 }
@@ -473,6 +629,8 @@ struct ViewUniform {
 pub enum Overlay {
     None,
     Temperature,
+    /// The air flow: hue for direction, brightness for speed.
+    Wind,
 }
 
 /// Draws a [`Sim2d`] to a render target, one cell per pixel.
@@ -498,6 +656,7 @@ impl Renderer2d {
                 layout::uniform(1, S::FRAGMENT, false),
                 layout::storage(2, S::FRAGMENT, true),
                 layout::storage(3, S::FRAGMENT, true),
+                layout::storage(4, S::FRAGMENT, true),
             ],
         });
         let groups = [0usize, 1].map(|i| {
@@ -510,6 +669,7 @@ impl Renderer2d {
                     entry(1, view.as_entire_binding()),
                     entry(2, cells.as_entire_binding()),
                     entry(3, therm.as_entire_binding()),
+                    entry(4, sim.air.as_entire_binding()),
                 ],
             })
         });

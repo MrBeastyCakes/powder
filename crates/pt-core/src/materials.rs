@@ -74,6 +74,10 @@ pub struct MaterialDef {
     pub id: String,
     pub name: String,
     pub kind: Kind,
+    /// Extra categories the material is listed under besides its kind, like
+    /// `"explosive"`: lower case letters, digits and `-`.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// `#rrggbb` in sRGB.
     pub color: String,
     pub density: f32,
@@ -361,6 +365,19 @@ fn validate(def: &MaterialDef, index: usize) -> Result<(), MaterialError> {
             return Err(invalid(&def.id, format!("{field} must be a positive number")));
         }
     }
+    for (i, tag) in def.tags.iter().enumerate() {
+        let well_formed =
+            !tag.is_empty() && tag.len() <= 24 && tag.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !well_formed {
+            return Err(invalid(
+                &def.id,
+                format!("tag `{tag}` must be 1 to 24 lower case letters, digits or `-`"),
+            ));
+        }
+        if def.tags[..i].contains(tag) {
+            return Err(invalid(&def.id, format!("tag `{tag}` is listed twice")));
+        }
+    }
     if !(def.conductivity.is_finite() && def.conductivity >= 0.0) {
         return Err(invalid(&def.id, "conductivity must be zero or positive"));
     }
@@ -492,6 +509,25 @@ mod tests {
         assert!(matches!(MaterialTable::from_toml(&src), Err(MaterialError::Schema { .. })));
         let src = MINIMAL.replace("conductivity = 0.02", "conductivity = 0.02\nviscosity = 3");
         assert!(matches!(MaterialTable::from_toml(&src), Err(MaterialError::Parse(_))));
+    }
+
+    #[test]
+    fn tags_are_optional_and_checked() {
+        let mat = |tags: &str| {
+            with(&format!(
+                "[[material]]\nid = \"a\"\nname = \"A\"\nkind = \"powder\"\ncolor = \"#ffffff\"\ndensity = 1\nheat_capacity = 1\nconductivity = 1\n{tags}\n"
+            ))
+        };
+        assert!(MaterialTable::from_toml(&mat("")).unwrap().def(1).tags.is_empty());
+        let t = MaterialTable::from_toml(&mat("tags = [\"explosive\", \"hot-2\"]")).unwrap();
+        assert_eq!(t.def(1).tags, ["explosive", "hot-2"]);
+        for bad in ["[\"\"]", "[\"Explosive\"]", "[\"a b\"]", "[\"x\", \"x\"]"] {
+            let src = mat(&format!("tags = {bad}"));
+            assert!(
+                matches!(MaterialTable::from_toml(&src), Err(MaterialError::Invalid { .. })),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

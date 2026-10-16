@@ -32,6 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: android-smoke-${{ matrix.abi }}
+          cache-on-failure: true
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

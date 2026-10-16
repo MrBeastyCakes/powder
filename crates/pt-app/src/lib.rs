@@ -140,7 +140,7 @@ struct Screen {
     egui_state: egui_winit::State,
     /// System bar insets in pixels, once Android has reported them.
     insets: Option<[u32; 2]>,
-    /// Logs each newly created Android surface reaching presentation.
+    /// Logs presentation after surface creation or returning to the foreground.
     presented: bool,
 }
 
@@ -428,6 +428,9 @@ impl ApplicationHandler for App {
                 screen.insets = None;
             }
             WindowEvent::Focused(_) | WindowEvent::Occluded(_) => {
+                if matches!(event, WindowEvent::Focused(true) | WindowEvent::Occluded(false)) {
+                    screen.presented = false;
+                }
                 self.pointers = Pointers::default();
                 engine.clock.reset(engine.epoch.elapsed().as_secs_f64());
             }

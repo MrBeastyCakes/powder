@@ -64,7 +64,7 @@ adb logcat -b crash -d -v threadtime > powder-crash.log
 
 The `powder-toy` tag reports startup stages, Rust panic details, and
 `startup: first frame presented` after the first presentation on each new
-surface. Keep the full logs: linker failures, Java exceptions, native
-signals, and GPU driver errors can use other tags.
+surface or after focus returns. Keep the full logs: linker failures, Java
+exceptions, native signals, and GPU driver errors can use other tags.
 
 [cargo-apk]: https://crates.io/crates/cargo-apk

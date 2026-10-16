@@ -7,11 +7,11 @@
 //! shelved: its code stays, but the app no longer offers it.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pt_core::gpu::Gpu;
 use pt_core::{MaterialTable, Tool};
-use pt_sim2d::{Overlay, Renderer2d, Sim2d, Stroke};
+use pt_sim2d::{Overlay, Renderer2d, Sim2d, Stroke, TickInput, TimedStroke};
 use pt_sim3d::{OrbitCamera, Renderer3d, Sim3d, Stroke3, Target, View3d};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -20,6 +20,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 mod catalog;
+mod clock;
+mod input;
 mod layout;
 mod ui;
 
@@ -53,7 +55,8 @@ pub struct Settings {
     pub paused: bool,
     pub step_once: bool,
     pub temperature_view: bool,
-    pub substeps: u32,
+    /// Playback speed scales complete fixed ticks, including heat and reactions.
+    pub simulation_speed: f64,
     pub heat_speed: f32,
     pub size_3d: u32,
     pub target_3d: Target,
@@ -101,8 +104,10 @@ struct Pointers {
     mouse: [f32; 2],
     mouse_left: bool,
     mouse_right: bool,
-    /// The pointer currently painting, and where it was last frame.
+    /// The pointer currently painting, and its latest event position.
     paint: Option<(PointerId, [f32; 2])>,
+    timeline: input::InputTimeline,
+    last_sample: Option<input::BrushSample>,
     /// Two-finger gesture: last centroid and finger distance.
     gesture: Option<([f32; 2], f32)>,
 }
@@ -122,6 +127,9 @@ struct Engine {
     ui_rects: Vec<egui::Rect>,
     /// This frame's screen layout.
     layout: Layout,
+    epoch: Instant,
+    clock: clock::SimulationClock,
+    repaint_delay: Duration,
 }
 
 /// The window and its surface; recreated on every resume.
@@ -132,6 +140,8 @@ struct Screen {
     egui_state: egui_winit::State,
     /// System bar insets in pixels, once Android has reported them.
     insets: Option<[u32; 2]>,
+    /// Logs presentation after surface creation or returning to the foreground.
+    presented: bool,
 }
 
 #[derive(Default)]
@@ -140,6 +150,7 @@ struct App {
     screen: Option<Screen>,
     pointers: Pointers,
     last_frame: Option<Instant>,
+    next_repaint: Option<Instant>,
 }
 
 /// Runs the app until the window closes.
@@ -158,6 +169,8 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
             .with_max_level(log::LevelFilter::Info)
             .with_tag("powder-toy"),
     );
+    std::panic::set_hook(Box::new(|panic| log::error!("fatal Rust panic: {panic}")));
+    log::info!("startup: Android entry point");
     let _ = ANDROID_APP.set(android_app.clone());
     let event_loop = EventLoop::builder()
         .with_android_app(android_app)
@@ -286,6 +299,7 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(430, 932));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let size = window.inner_size();
+        log::info!("startup: native window {} x {}", size.width, size.height);
 
         let instance = match &self.engine {
             Some(engine) => engine.gpu.instance.clone(),
@@ -299,6 +313,7 @@ impl ApplicationHandler for App {
             let egui_ctx = egui::Context::default();
             ui::install_fonts(&egui_ctx);
             let egui_renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
+            log::info!("startup: UI renderer ready");
             let sand = table.expect_id("sand");
             let settings = Settings {
                 mode: Mode::TwoD,
@@ -310,7 +325,7 @@ impl ApplicationHandler for App {
                 paused: false,
                 step_once: false,
                 temperature_view: false,
-                substeps: pt_sim2d::DEFAULT_SUBSTEPS,
+                simulation_speed: 1.0,
                 heat_speed: 1.0,
                 size_3d: 128,
                 target_3d: Target::Surface,
@@ -332,9 +347,14 @@ impl ApplicationHandler for App {
                 stats,
                 ui_rects: vec![],
                 layout: layout::layout([size.width, size.height], window.scale_factor() as f32, [0, 0]),
+                epoch: Instant::now(),
+                clock: clock::SimulationClock::default(),
+                repaint_delay: Duration::ZERO,
             });
         }
         let engine = self.engine.as_mut().unwrap();
+        engine.clock.reset(engine.epoch.elapsed().as_secs_f64());
+        self.last_frame = None;
         let config = surface_config(&surface, &engine.gpu, [size.width, size.height]);
         surface.configure(&engine.gpu.device, &config);
         if config.format != engine.format {
@@ -357,20 +377,39 @@ impl ApplicationHandler for App {
             engine.new_world_2d(true);
         }
         window.request_redraw();
+        event_loop.set_control_flow(ControlFlow::Poll);
+        self.next_repaint = None;
         self.screen = Some(Screen {
             window,
             surface,
             config,
             egui_state,
             insets,
+            presented: false,
         });
     }
 
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         // Android destroys the native window when the app goes to the
         // background; the GPU and the worlds stay alive.
         self.screen = None;
         self.pointers = Pointers::default();
+        self.last_frame = None;
+        self.next_repaint = None;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        if let Some(engine) = self.engine.as_mut() {
+            engine.clock.reset(engine.epoch.elapsed().as_secs_f64());
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.next_repaint.is_some_and(|deadline| deadline <= Instant::now()) {
+            self.next_repaint = None;
+            event_loop.set_control_flow(ControlFlow::Wait);
+            if let Some(screen) = self.screen.as_ref() {
+                screen.window.request_redraw();
+            }
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -378,6 +417,7 @@ impl ApplicationHandler for App {
             return;
         };
         let egui_response = screen.egui_state.on_window_event(&screen.window, &event);
+        let input_or_window_change = !matches!(event, WindowEvent::RedrawRequested);
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -387,14 +427,33 @@ impl ApplicationHandler for App {
                 screen.surface.configure(&engine.gpu.device, &screen.config);
                 screen.insets = None;
             }
+            WindowEvent::Focused(_) | WindowEvent::Occluded(_) => {
+                if matches!(event, WindowEvent::Focused(true) | WindowEvent::Occluded(false)) {
+                    screen.presented = false;
+                }
+                self.pointers = Pointers::default();
+                engine.clock.reset(engine.epoch.elapsed().as_secs_f64());
+            }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 if let Some(last) = self.last_frame {
                     engine.stats.frame((now - last).as_secs_f64() * 1000.0);
                 }
                 self.last_frame = Some(now);
-                engine.frame(screen, &mut self.pointers);
-                screen.window.request_redraw();
+                let rendered = engine.frame(screen, &mut self.pointers);
+                if !rendered || engine.settings.paused {
+                    self.last_frame = None;
+                    self.next_repaint = if engine.repaint_delay == Duration::MAX {
+                        None
+                    } else {
+                        Instant::now().checked_add(engine.repaint_delay)
+                    };
+                    event_loop.set_control_flow(self.next_repaint.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+                } else {
+                    self.next_repaint = None;
+                    event_loop.set_control_flow(ControlFlow::Poll);
+                    screen.window.request_redraw();
+                }
             }
             WindowEvent::Touch(touch) => {
                 let p = [touch.location.x as f32, touch.location.y as f32];
@@ -421,8 +480,12 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                self.pointers.refresh(engine);
             }
             _ => {}
+        }
+        if input_or_window_change {
+            screen.window.request_redraw();
         }
     }
 }
@@ -436,6 +499,55 @@ impl Pointers {
         !(engine.settings.mode == Mode::ThreeD && engine.settings.tool == ToolKind::Camera)
     }
 
+    fn record(&mut self, engine: &mut Engine, p: [f32; 2]) {
+        let position = match engine.settings.mode {
+            Mode::TwoD => {
+                let Some(w) = engine.world2d.as_ref() else { return };
+                let [sx, sy, sw, sh] = engine.layout.sim;
+                let offset = [
+                    sx as i32 + (sw as i32 - w.sim.width as i32) / 2,
+                    sy as i32 + (sh as i32 - w.sim.height as i32) / 2,
+                ];
+                [p[0] - offset[0] as f32, p[1] - offset[1] as f32]
+            }
+            Mode::ThreeD => p,
+        };
+        let sample = input::BrushSample {
+            position,
+            radius: if engine.settings.mode == Mode::TwoD {
+                engine.settings.brush_2d
+            } else {
+                engine.settings.brush_3d
+            },
+            tool: engine.settings.tool(),
+            mode: engine.settings.mode,
+            target: engine.settings.target_3d,
+        };
+        if let Some((id, _)) = self.paint {
+            self.paint = Some((id, p));
+        }
+        if self.last_sample == Some(sample) {
+            return;
+        }
+        self.last_sample = Some(sample);
+        self.timeline.sample(engine.epoch.elapsed().as_secs_f64(), sample);
+        if engine.settings.tool == ToolKind::Material && engine.settings.recent.first() != Some(&engine.settings.material) {
+            catalog::remember(&mut engine.settings.recent, engine.settings.material);
+        }
+    }
+
+    fn end(&mut self, engine: &Engine) {
+        self.timeline.end(engine.epoch.elapsed().as_secs_f64());
+        self.paint = None;
+        self.last_sample = None;
+    }
+
+    fn refresh(&mut self, engine: &mut Engine) {
+        if let Some((_, p)) = self.paint {
+            self.record(engine, p);
+        }
+    }
+
     fn on_touch(&mut self, engine: &mut Engine, id: u64, phase: TouchPhase, p: [f32; 2]) {
         match phase {
             TouchPhase::Started => {
@@ -445,9 +557,10 @@ impl Pointers {
                 self.touches.push((id, p));
                 if self.touches.len() == 1 && Pointers::paints(engine) {
                     self.paint = Some((PointerId::Touch(id), p));
+                    self.record(engine, p);
                 } else {
                     // A second finger turns a stroke into a camera gesture.
-                    self.paint = None;
+                    self.end(engine);
                     self.gesture = None;
                 }
             }
@@ -457,6 +570,9 @@ impl Pointers {
                 };
                 let prev = t.1;
                 t.1 = p;
+                if self.paint.is_some_and(|(pid, _)| pid == PointerId::Touch(id)) {
+                    self.record(engine, p);
+                }
                 match self.touches.len() {
                     1 if self.paint.is_none() => {
                         if let Some(w) = engine.world3d.as_mut().filter(|_| engine.settings.mode == Mode::ThreeD) {
@@ -484,10 +600,13 @@ impl Pointers {
                 }
             }
             TouchPhase::Ended | TouchPhase::Cancelled => {
-                self.touches.retain(|t| t.0 != id);
                 if self.paint.is_some_and(|(pid, _)| pid == PointerId::Touch(id)) {
-                    self.paint = None;
+                    if phase == TouchPhase::Ended && self.paint.is_some_and(|(_, last)| last != p) {
+                        self.record(engine, p);
+                    }
+                    self.end(engine);
                 }
+                self.touches.retain(|t| t.0 != id);
                 if self.touches.len() < 2 {
                     self.gesture = None;
                 }
@@ -499,6 +618,9 @@ impl Pointers {
         let p = [position.x as f32, position.y as f32];
         let prev = self.mouse;
         self.mouse = p;
+        if self.paint.is_some_and(|(id, _)| id == PointerId::Mouse) {
+            self.record(engine, p);
+        }
         let orbiting = self.mouse_right || (self.mouse_left && !Pointers::paints(engine));
         if orbiting && engine.settings.mode == Mode::ThreeD {
             if let Some(w) = engine.world3d.as_mut() {
@@ -513,19 +635,13 @@ impl Pointers {
                 self.mouse_left = down;
                 if down && Pointers::paints(engine) && !Pointers::over_ui(engine, self.mouse) {
                     self.paint = Some((PointerId::Mouse, self.mouse));
+                    self.record(engine, self.mouse);
                 } else if !down && self.paint.is_some_and(|(id, _)| id == PointerId::Mouse) {
-                    self.paint = None;
+                    self.end(engine);
                 }
             }
             MouseButton::Right => self.mouse_right = down,
             _ => {}
-        }
-    }
-
-    fn position(&self, id: PointerId) -> Option<[f32; 2]> {
-        match id {
-            PointerId::Mouse => Some(self.mouse),
-            PointerId::Touch(t) => self.touches.iter().find(|x| x.0 == t).map(|x| x.1),
         }
     }
 }
@@ -539,10 +655,12 @@ impl Engine {
             let scene = pt_sim2d::scenes::demo(&self.table, size[0], size[1], 1);
             sim.upload(&self.gpu, &scene.cells, &scene.temps);
         }
-        sim.move_substeps = self.settings.substeps;
+        sim.move_substeps = pt_sim2d::DEFAULT_SUBSTEPS;
         let renderer = Renderer2d::new(&self.gpu, &sim, self.format);
         log::info!("2D world {} x {} ({:.1} M cells)", size[0], size[1], sim.cell_count() as f64 / 1e6);
         self.world2d = Some(World2d { sim, renderer });
+        self.clock = clock::SimulationClock::default();
+        self.clock.reset(self.epoch.elapsed().as_secs_f64());
     }
 
     fn new_world_3d(&mut self, n: u32, demo: bool) {
@@ -558,7 +676,7 @@ impl Engine {
             let scene = pt_sim3d::scenes::demo(&self.table, dims, 1);
             sim.upload(&self.gpu, &scene.cells, &scene.temps);
         }
-        sim.move_substeps = self.settings.substeps;
+        sim.move_substeps = pt_sim2d::DEFAULT_SUBSTEPS;
         let renderer = Renderer3d::new(&self.gpu, &sim, self.format);
         log::info!("3D world {n}^3 ({:.1} M voxels)", sim.cell_count() as f64 / 1e6);
         self.world3d = Some(World3d {
@@ -568,7 +686,10 @@ impl Engine {
         });
     }
 
-    fn frame(&mut self, screen: &mut Screen, pointers: &mut Pointers) {
+    fn frame(&mut self, screen: &mut Screen, pointers: &mut Pointers) -> bool {
+        // A hidden or invalid surface waits for a window/input event. Failed
+        // acquisition must not leave an immediate paused repaint deadline.
+        self.repaint_delay = Duration::MAX;
         let size = [screen.config.width, screen.config.height];
         if screen.insets.is_none() {
             screen.insets = system_insets();
@@ -581,9 +702,14 @@ impl Engine {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 screen.surface.configure(&self.gpu.device, &screen.config);
-                return;
+                self.repaint_delay = Duration::from_millis(16);
+                return false;
             }
-            _ => return,
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                self.repaint_delay = Duration::from_millis(50);
+                return false;
+            }
+            _ => return false,
         };
 
         // UI first, so this frame's input knows where the UI is.
@@ -592,6 +718,10 @@ impl Engine {
         let mut output = self.egui_ctx.clone().run_ui(raw_input, |ui| {
             actions = ui::draw(ui, self);
         });
+        self.repaint_delay = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
         screen
             .egui_state
             .handle_platform_output(&screen.window, output.platform_output.clone());
@@ -601,7 +731,11 @@ impl Engine {
             .iter()
             .map(|r| egui::Rect::from_min_max((r.min.to_vec2() * ppp).to_pos2(), (r.max.to_vec2() * ppp).to_pos2()))
             .collect();
+        if actions.new_2d.is_some() {
+            *pointers = Pointers::default();
+        }
         self.apply(actions);
+        pointers.refresh(self);
         if self.settings.mode == Mode::ThreeD && self.world3d.is_none() {
             self.new_world_3d(self.settings.size_3d, true);
             if self.world3d.is_none() {
@@ -609,19 +743,19 @@ impl Engine {
             }
         }
 
-        let ticks = if !self.settings.paused || std::mem::take(&mut self.settings.step_once) {
-            1
-        } else {
-            0
-        };
-        let tool = self.settings.tool();
-        let paint_pos = pointers.paint.and_then(|(id, last)| pointers.position(id).map(|p| (id, last, p)));
-        if let Some((id, _, p)) = paint_pos {
-            pointers.paint = Some((id, p));
-            // Recent lists what was painted with, not everything tapped while browsing.
-            if self.settings.tool == ToolKind::Material && self.settings.recent.first() != Some(&self.settings.material) {
-                catalog::remember(&mut self.settings.recent, self.settings.material);
-            }
+        let now = self.epoch.elapsed().as_secs_f64();
+        let plan = self.clock.frame(
+            now,
+            self.settings.simulation_speed,
+            self.settings.paused,
+            std::mem::take(&mut self.settings.step_once),
+        );
+        self.stats.simulated_seconds = self.clock.simulated_seconds;
+        self.stats.simulation_limited = plan.dropped_seconds > 0.0;
+        let mut inputs: Vec<(Vec<input::BrushSegment>, bool)> =
+            plan.ticks.into_iter().map(|tick| (pointers.timeline.tick(tick), true)).collect();
+        if self.settings.paused && inputs.is_empty() {
+            inputs.push((pointers.timeline.construction(now), false));
         }
 
         let target = frame.texture.create_view(&Default::default());
@@ -637,18 +771,28 @@ impl Engine {
                     sx as i32 + (sw as i32 - w.sim.width as i32) / 2,
                     sy as i32 + (sh as i32 - w.sim.height as i32) / 2,
                 ];
-                if let Some((_, last, p)) = paint_pos {
-                    let to_world = |q: [f32; 2]| [q[0] - offset[0] as f32, q[1] - offset[1] as f32];
-                    w.sim.stroke(Stroke {
-                        from: to_world(last),
-                        to: to_world(p),
-                        radius: self.settings.brush_2d,
-                        tool,
-                    });
-                }
-                w.sim.move_substeps = self.settings.substeps;
+                let actions: Vec<TickInput> = inputs
+                    .iter()
+                    .map(|(strokes, advance)| TickInput {
+                        advance: *advance,
+                        strokes: strokes
+                            .iter()
+                            .filter(|s| s.sample.mode == Mode::TwoD)
+                            .map(|s| TimedStroke {
+                                stroke: Stroke {
+                                    from: s.from,
+                                    to: s.sample.position,
+                                    radius: s.sample.radius,
+                                    tool: s.sample.tool,
+                                },
+                                duration_seconds: s.duration_seconds,
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                w.sim.move_substeps = pt_sim2d::DEFAULT_SUBSTEPS;
                 w.sim.heat_speed = self.settings.heat_speed;
-                w.sim.encode(&self.gpu.queue, &mut encoder, ticks);
+                w.sim.encode_actions(&self.gpu.queue, &mut encoder, &actions);
                 let overlay = if self.settings.temperature_view {
                     Overlay::Temperature
                 } else {
@@ -658,19 +802,33 @@ impl Engine {
             }
             Mode::ThreeD => {
                 let w = self.world3d.as_mut().expect("3D world exists");
-                if let Some((_, _, p)) = paint_pos {
-                    let (origin, dir) = w.camera.ray(p, [size[0] as f32, size[1] as f32]);
-                    w.sim.stroke(Stroke3 {
-                        origin,
-                        dir,
-                        radius: self.settings.brush_3d,
-                        tool,
-                        target: self.settings.target_3d,
-                    });
-                }
-                w.sim.move_substeps = self.settings.substeps;
+                w.sim.move_substeps = pt_sim2d::DEFAULT_SUBSTEPS;
                 w.sim.heat_speed = self.settings.heat_speed;
-                w.sim.encode(&self.gpu.queue, &mut encoder, ticks);
+                // This shelved backend has one brush uniform. Submit before
+                // reusing it so batches never overwrite an earlier stroke.
+                for (strokes, advance) in &inputs {
+                    for stroke in strokes.iter().filter(|s| s.sample.mode == Mode::ThreeD) {
+                        let (origin, dir) = w.camera.ray(stroke.sample.position, [size[0] as f32, size[1] as f32]);
+                        w.sim.timed_stroke(
+                            Stroke3 {
+                                origin,
+                                dir,
+                                radius: stroke.sample.radius,
+                                tool: stroke.sample.tool,
+                                target: stroke.sample.target,
+                            },
+                            stroke.duration_seconds,
+                        );
+                        let mut step = self.gpu.device.create_command_encoder(&Default::default());
+                        w.sim.encode(&self.gpu.queue, &mut step, 0);
+                        self.gpu.queue.submit([step.finish()]);
+                    }
+                    if *advance {
+                        let mut step = self.gpu.device.create_command_encoder(&Default::default());
+                        w.sim.encode(&self.gpu.queue, &mut step, 1);
+                        self.gpu.queue.submit([step.finish()]);
+                    }
+                }
                 let view = View3d {
                     show_plane: self.settings.target_3d == Target::Plane,
                     brush_radius: self.settings.brush_3d,
@@ -723,6 +881,11 @@ impl Engine {
         self.gpu.queue.submit(extra.into_iter().chain([encoder.finish()]));
         screen.window.pre_present_notify();
         self.gpu.queue.present(frame);
+        if !screen.presented {
+            screen.presented = true;
+            log::info!("startup: first frame presented");
+        }
+        true
     }
 
     fn apply(&mut self, actions: ui::Actions) {
@@ -744,5 +907,6 @@ impl Engine {
         let report = pt_bench::table(&self.gpu.adapter_name(), &results);
         log::info!("benchmark\n{report}");
         self.stats.bench = Some(report);
+        self.clock.reset(self.epoch.elapsed().as_secs_f64());
     }
 }

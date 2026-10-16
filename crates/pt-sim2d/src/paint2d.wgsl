@@ -4,7 +4,7 @@ struct Brush {
     ax: f32, ay: f32, bx: f32, by: f32,
     radius: f32, mat: u32, temp: f32, mode: u32,
     origin_x: i32, origin_y: i32, width: u32, height: u32,
-    seed: u32, fill: f32, _p0: u32, _p1: u32,
+    seed: u32, fill: f32, thermal_scale: f32, _p1: u32,
 }
 
 const MODE_PAINT: u32 = 0u;
@@ -43,10 +43,10 @@ fn paint(@builtin(global_invocation_id) gid: vec3<u32>) {
     let current = mat_of(cells[i]);
     switch brush.mode {
         case MODE_HEAT: {
-            therm[i].x = min(therm[i].x + 40.0 / materials.m[current].heat_capacity, MAX_TEMP);
+            therm[i].x = min(therm[i].x + 40.0 * brush.thermal_scale / materials.m[current].heat_capacity, MAX_TEMP);
         }
         case MODE_COOL: {
-            therm[i].x = max(therm[i].x - 40.0 / materials.m[current].heat_capacity, MIN_TEMP);
+            therm[i].x = max(therm[i].x - 40.0 * brush.thermal_scale / materials.m[current].heat_capacity, MIN_TEMP);
         }
         case MODE_ERASE: {
             cells[i] = make_cell(0u, h >> 24u);

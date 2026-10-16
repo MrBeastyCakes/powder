@@ -21,6 +21,8 @@ pub struct Stats {
     pub frame_ms: f64,
     pub message: String,
     pub bench: Option<String>,
+    pub simulated_seconds: f64,
+    pub simulation_limited: bool,
 }
 
 impl Stats {
@@ -30,6 +32,8 @@ impl Stats {
             frame_ms: 16.7,
             message: String::new(),
             bench: None,
+            simulated_seconds: 0.0,
+            simulation_limited: false,
         }
     }
 
@@ -59,9 +63,8 @@ const MUTED: Color32 = Color32::from_rgb(0x9a, 0xa0, 0xad);
 const DIM: Color32 = Color32::from_rgb(0x8b, 0x92, 0xa0);
 const ACCENT: Color32 = Color32::from_rgb(0xff, 0xb0, 0x30);
 
-/// Block movement passes per tick the speed keys step through. 8 is normal
-/// speed (see `pt_sim2d::DEFAULT_SUBSTEPS`).
-const SPEEDS: [u32; 5] = [2, 4, 8, 12, 16];
+/// Playback speed changes the number of complete 1/60-second physics ticks.
+const SPEEDS: [f64; 5] = [0.25, 0.5, 1.0, 1.5, 2.0];
 const SPEED_LABELS: [&str; 5] = ["¼×", "½×", "1×", "1½×", "2×"];
 /// Height of the top strip, its bottom rule included.
 const STRIP_H: f32 = 53.0;
@@ -183,10 +186,16 @@ pub fn draw(root: &mut egui::Ui, engine: &mut Engine) -> Actions {
         .interactable(false)
         .show(ctx, |ui| {
             ui.label(
-                RichText::new(format!("{fps:.0} fps  {:.1} ms  {world}", engine.stats.frame_ms))
-                    .monospace()
-                    .color(Color32::from_gray(200)),
+                RichText::new(format!(
+                    "{fps:.0} fps  {:.1} ms  {world}  {:.2} s",
+                    engine.stats.frame_ms, engine.stats.simulated_seconds
+                ))
+                .monospace()
+                .color(Color32::from_gray(200)),
             );
+            if engine.stats.simulation_limited {
+                ui.label(RichText::new("Simulation slowed to stay responsive").small().color(ACCENT));
+            }
             if !engine.stats.message.is_empty() {
                 ui.label(RichText::new(&engine.stats.message).color(Color32::from_rgb(255, 190, 90)));
             }
@@ -211,7 +220,7 @@ pub fn draw(root: &mut egui::Ui, engine: &mut Engine) -> Actions {
                         // left, so none runs past the edge of the screen.
                         let slider_width = (ui.available_width() - 70.0).max(60.0);
                         ui.spacing_mut().slider_width = slider_width;
-                        ui.label("Heat speed");
+                        ui.label("Thermal conductivity");
                         ui.add(egui::Slider::new(&mut s.heat_speed, 0.1..=4.0));
                         ui.separator();
                         ui.label("New world");
@@ -315,16 +324,16 @@ fn top_strip(ui: &egui::Ui, rect: Rect, s: &mut Settings) {
 
     let speed = at(step.right() + 6.0, 94.0);
     p.rect_filled(speed, 10, KEY);
-    let level = SPEEDS.iter().position(|&n| n >= s.substeps).unwrap_or(SPEEDS.len() - 1);
+    let level = SPEEDS.iter().position(|&n| n >= s.simulation_speed).unwrap_or(SPEEDS.len() - 1);
     let can_slow = level > 0;
     let can_speed = level + 1 < SPEEDS.len();
     let slower = at(speed.left(), 34.0);
     if key(ui, slower, "slower", can_slow, Color32::TRANSPARENT).clicked() && can_slow {
-        s.substeps = SPEEDS[level - 1];
+        s.simulation_speed = SPEEDS[level - 1];
     }
     let faster = at(speed.right() - 34.0, 34.0);
     if key(ui, faster, "faster", can_speed, Color32::TRANSPARENT).clicked() && can_speed {
-        s.substeps = SPEEDS[level + 1];
+        s.simulation_speed = SPEEDS[level + 1];
     }
     let dim = |on: bool| if on { TEXT } else { TEXT.gamma_multiply(0.4) };
     paint_icon(p, Icon::Minus, slower.center(), 14.0, dim(can_slow));

@@ -53,7 +53,7 @@ Tests (they need a Vulkan device; on a machine without a GPU, install
 `mesa-vulkan-drivers` for the lavapipe software device):
 
 ```sh
-cargo test --workspace
+cargo test --workspace --all-targets
 ```
 
 Benchmark and screenshots:
@@ -65,6 +65,40 @@ cargo run --release -p pt-bench -- --screenshots out # PNGs of both prototypes
 
 On a phone, open Menu, then Run benchmark, then Copy results. It measures the
 same scenes as `pt-bench`.
+
+## Scientific gas foundation
+
+The [accepted air overhaul](docs/air-physics-overhaul.md) is being implemented
+in stages. The app now runs physics at a fixed 60 reference ticks per simulated
+second: playback speed scales movement, heat, and reactions together. Brush
+paths are timestamped, and heat/cool exposure follows simulated time. Paused
+construction remains available, and the paused app sleeps between input or UI
+repaints.
+
+`pt_core::gas` adds a separate CPU reference for a uniform, rigid, insulated,
+sealed chamber. It stores the masses of nitrogen, oxygen, argon, carbon dioxide,
+and water vapor, momentum, and total energy; it derives density, temperature,
+and absolute pressure. Temperature-dependent ideal-mixture properties cover
+200–1000 K, with versioned physical snapshots and an external heat ledger.
+Water vapor remains noncondensing in this first reference. The existing app
+still uses its legacy material simulation; this reference does not yet provide
+spatial airflow, phase change, combustion, or validated phone performance.
+
+Run the analytical heating demonstration and independent property tests:
+
+```sh
+cargo run -p pt-core --example sealed_chamber
+cargo test -p pt-core --test gas_reference
+```
+
+The 1 m³ constant-heat-capacity reference receives 10,000 J over 10 simulated
+seconds. Its mass stays at 1.204153347024 kg, temperature rises from 293.15 K to
+304.721496 K, and pressure rises from 101325 Pa to 105324.596781 Pa, matching
+independent analytical calculations. The constant-capacity case verifies the
+accounting; separate tests compare the variable-capacity model to NIST data.
+
+See [implementation status](docs/air-physics-progress.md) for the completed
+foundation and remaining qualification gates.
 
 ## Phase 0 status
 
@@ -79,7 +113,9 @@ Done:
   heat and cool tools, temperature view, pause, step and speed, and an
   on-device benchmark. UI fonts are IBM Plex, subset and renamed under the
   SIL Open Font License (`crates/pt-app/fonts`)
-- 31 tests (8 material, 9 app, 9 2D, 5 3D) passing on a software GPU
+- 64 tests (8 material, 13 gas reference, 4 CPU flow comparison, 16 app,
+  17 2D, 6 3D) passing,
+  with GPU tests on software Vulkan
 - Android target type-checks; APK packaging set up with cargo-apk
 
 Next:

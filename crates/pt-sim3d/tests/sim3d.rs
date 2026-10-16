@@ -146,3 +146,51 @@ fn brush_paints_on_surfaces_and_planes() {
     let hit = sim.read_pick(&gpu).expect("the ray should cross the plane");
     assert!((hit.y - 20.5).abs() < 0.01, "plane hit at {hit}");
 }
+
+#[test]
+fn thermal_exposure_and_uniforms_survive_multiple_encodes() {
+    let gpu = gpu();
+    let table = MaterialTable::core();
+    let wall = table.expect_id("wall");
+    let capacity = table.def(wall).heat_capacity;
+    let dims = [8, 8, 8];
+    let (mut cells, mut temps) = world(dims);
+    fill(dims, &mut cells, &mut temps, [0, 0, 0], dims, wall, 20.0);
+    let mut sim = Sim3d::new(&gpu, table, dims, 5);
+    sim.plane_y = 3.0;
+    sim.upload(&gpu, &cells, &temps);
+    let stroke = |x, tool| Stroke3 {
+        origin: Vec3::new(x, 20.0, 3.5),
+        dir: Vec3::NEG_Y,
+        radius: 0.5,
+        tool,
+        target: Target::Plane,
+    };
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    for (x, tool, duration) in [
+        (2.5, Tool::Heat, 1.0 / 120.0),
+        (4.5, Tool::Heat, 1.0 / 240.0),
+        (2.5, Tool::Cool, 1.0 / 240.0),
+        (4.5, Tool::Heat, 0.0),
+    ] {
+        sim.timed_stroke(stroke(x, tool), duration);
+        sim.encode(&gpu.queue, &mut encoder, 0);
+    }
+    sim.stroke(stroke(6.5, Tool::Heat));
+    sim.encode(&gpu.queue, &mut encoder, 0);
+    gpu.queue.submit([encoder.finish()]);
+    gpu.wait();
+
+    let therm = sim.read_therm(&gpu);
+    for x in [2, 4] {
+        let actual = therm[sim.index(x, 3, 3)][0];
+        assert!(
+            (actual - (20.0 + 10.0 / capacity)).abs() < 1e-4,
+            "fractional exposure at x={x}: {actual}"
+        );
+    }
+    let legacy = therm[sim.index(6, 3, 3)][0];
+    assert!((legacy - (20.0 + 40.0 / capacity)).abs() < 1e-4, "legacy exposure: {legacy}");
+    assert_eq!(therm[sim.index(0, 3, 3)][0], 20.0);
+    assert_eq!(sim.tick, 0);
+}

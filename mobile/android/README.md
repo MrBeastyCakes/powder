@@ -48,11 +48,23 @@ secrets, CI makes a throwaway key per build (and warns), so each APK must
 replace the installed app. The first build with the new key also needs one
 uninstall, since its key differs from the earlier throwaway ones.
 
-## Status
+## Startup diagnostics
 
-The Android target type-checks in CI (`cargo check -p pt-app --target
-aarch64-linux-android`). Building the APK needs the NDK, which the cloud
-container that wrote this code could not download, so the first real APK
-build will happen on a machine with the SDK installed.
+If an installed APK closes on launch, capture both the native and Android
+crash logs. Building an APK or passing headless GPU tests does not verify
+NativeActivity startup on a phone.
+
+```sh
+adb logcat -c
+adb shell am force-stop app.powdertoy.next
+adb shell am start -W -n app.powdertoy.next/android.app.NativeActivity
+adb logcat -d -v threadtime > powder-startup.log
+adb logcat -b crash -d -v threadtime > powder-crash.log
+```
+
+The `powder-toy` tag reports startup stages, Rust panic details, and
+`startup: first frame presented` after the first presentation on each new
+surface or after focus returns. Keep the full logs: linker failures, Java
+exceptions, native signals, and GPU driver errors can use other tags.
 
 [cargo-apk]: https://crates.io/crates/cargo-apk

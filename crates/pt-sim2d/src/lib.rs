@@ -52,7 +52,7 @@ struct BrushUniform {
     height: u32,
     seed: u32,
     fill: f32,
-    _p0: u32,
+    thermal_scale: f32,
     _p1: u32,
 }
 
@@ -63,6 +63,21 @@ pub struct Stroke {
     pub to: [f32; 2],
     pub radius: f32,
     pub tool: Tool,
+}
+
+/// A stroke with its exposure in simulated seconds. Construction ignores the
+/// exposure; heat/cool use the legacy power of 40 energy units per 1/60 second.
+#[derive(Debug, Clone, Copy)]
+pub struct TimedStroke {
+    pub stroke: Stroke,
+    pub duration_seconds: f32,
+}
+
+/// Inputs applied immediately before an optional fixed simulation tick.
+#[derive(Debug, Clone, Default)]
+pub struct TickInput {
+    pub strokes: Vec<TimedStroke>,
+    pub advance: bool,
 }
 
 pub struct Sim2d {
@@ -77,6 +92,7 @@ pub struct Sim2d {
     pub move_substeps: u32,
     pub table: MaterialTable,
 
+    device: wgpu::Device,
     materials: wgpu::Buffer,
     cells: [wgpu::Buffer; 2],
     therm: [wgpu::Buffer; 2],
@@ -97,7 +113,7 @@ pub struct Sim2d {
     settle_pipe: wgpu::ComputePipeline,
     reset_pipe: wgpu::ComputePipeline,
     paint_pipe: wgpu::ComputePipeline,
-    pending_stroke: Option<Stroke>,
+    pending_strokes: Vec<Stroke>,
 }
 
 impl Sim2d {
@@ -224,6 +240,7 @@ impl Sim2d {
             reset_pipe: compute_pipeline(device, &step_pl, &sim_module, "reset"),
             paint_pipe: compute_pipeline(device, &paint_pl, &paint_module, "paint"),
             table,
+            device: device.clone(),
             materials,
             cells,
             therm,
@@ -234,7 +251,7 @@ impl Sim2d {
             current: 0,
             step_groups,
             paint_groups,
-            pending_stroke: None,
+            pending_strokes: Vec::new(),
         };
         sim.clear(gpu);
         sim
@@ -275,19 +292,50 @@ impl Sim2d {
         gpu.queue.write_buffer(&self.awake, 0, bytemuck::cast_slice(&ones));
     }
 
-    /// Queues a brush stroke; it is applied at the start of the next
-    /// [`encode`](Self::encode). One stroke per frame is enough for one finger,
-    /// and longer moves are drawn as a capsule so nothing is skipped.
+    /// Queues a stroke at the legacy exposure of 1/60 simulated second. All
+    /// queued strokes are retained until the next encode, in input order.
     pub fn stroke(&mut self, stroke: Stroke) {
-        self.pending_stroke = Some(stroke);
+        self.pending_strokes.push(stroke);
     }
 
-    /// Records any pending stroke and `ticks` simulation ticks. Call once per
-    /// queue submit: the tick parameters share one uniform buffer.
+    /// Records pending strokes and ticks. Uniform snapshots are copied in
+    /// command order, so several encodes can safely share one queue submit.
     pub fn encode(&mut self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, ticks: u32) {
-        if let Some(stroke) = self.pending_stroke.take() {
-            self.encode_stroke(queue, encoder, stroke);
+        self.encode_actions(queue, encoder, &[]);
+        self.encode_ticks(encoder, ticks);
+    }
+
+    /// Applies timestamped inputs at their fixed-tick boundaries. Construction
+    /// can be encoded without advancing time; thermal exposure is explicit.
+    pub fn encode_actions(&mut self, _queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, actions: &[TickInput]) {
+        for action in actions {
+            for timed in &action.strokes {
+                assert!(
+                    timed.duration_seconds.is_finite() && timed.duration_seconds >= 0.0,
+                    "invalid stroke exposure"
+                );
+            }
         }
+        for stroke in std::mem::take(&mut self.pending_strokes) {
+            self.encode_stroke(
+                encoder,
+                TimedStroke {
+                    stroke,
+                    duration_seconds: 1.0 / 60.0,
+                },
+            );
+        }
+        for action in actions {
+            for &stroke in &action.strokes {
+                self.encode_stroke(encoder, stroke);
+            }
+            if action.advance {
+                self.encode_ticks(encoder, 1);
+            }
+        }
+    }
+
+    fn encode_ticks(&mut self, encoder: &mut wgpu::CommandEncoder, ticks: u32) {
         if ticks == 0 {
             return;
         }
@@ -317,7 +365,12 @@ impl Sim2d {
                 });
             }
         }
-        queue.write_buffer(&self.params, 0, &slots);
+        let snapshot = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("immutable tick parameters"),
+            contents: &slots,
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
+        encoder.copy_buffer_to_buffer(&snapshot, 0, &self.params, 0, slots.len() as u64);
 
         let cells_x = self.width.div_ceil(8);
         let cells_y = self.height.div_ceil(8);
@@ -356,12 +409,22 @@ impl Sim2d {
         self.tick = self.tick.wrapping_add(ticks);
     }
 
-    fn encode_stroke(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, s: Stroke) {
+    fn encode_stroke(&self, encoder: &mut wgpu::CommandEncoder, timed: TimedStroke) {
+        let s = timed.stroke;
+        if s.from.iter().chain(&s.to).any(|v| !v.is_finite()) || !s.radius.is_finite() {
+            return;
+        }
+        if matches!(s.tool, Tool::Heat | Tool::Cool) && timed.duration_seconds == 0.0 {
+            return;
+        }
         let r = s.radius.max(0.5);
-        let min_x = (s.from[0].min(s.to[0]) - r).floor() as i32;
-        let min_y = (s.from[1].min(s.to[1]) - r).floor() as i32;
-        let max_x = (s.from[0].max(s.to[0]) + r).ceil() as i32;
-        let max_y = (s.from[1].max(s.to[1]) + r).ceil() as i32;
+        let min_x = ((s.from[0].min(s.to[0]) - r).floor() as i32).max(0);
+        let min_y = ((s.from[1].min(s.to[1]) - r).floor() as i32).max(0);
+        let max_x = ((s.from[0].max(s.to[0]) + r).ceil() as i32).min(self.width as i32 - 1);
+        let max_y = ((s.from[1].max(s.to[1]) + r).ceil() as i32).min(self.height as i32 - 1);
+        if max_x < min_x || max_y < min_y {
+            return;
+        }
         let (mode, mat) = s.tool.mode_and_material();
         let def = self.table.def(mat);
         let uniform = BrushUniform {
@@ -379,10 +442,15 @@ impl Sim2d {
             height: self.height,
             seed: self.tick.wrapping_mul(0x2545_f491) ^ self.seed,
             fill: fill_for(def.kind),
-            _p0: 0,
+            thermal_scale: timed.duration_seconds * 60.0,
             _p1: 0,
         };
-        queue.write_buffer(&self.brush, 0, bytemuck::bytes_of(&uniform));
+        let snapshot = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("immutable stroke parameters"),
+            contents: bytemuck::bytes_of(&uniform),
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
+        encoder.copy_buffer_to_buffer(&snapshot, 0, &self.brush, 0, std::mem::size_of::<BrushUniform>() as u64);
         let w = (max_x - min_x + 1) as u32;
         let h = (max_y - min_y + 1) as u32;
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

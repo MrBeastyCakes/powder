@@ -48,7 +48,7 @@ jobs:
           export CARGO_APK_RELEASE_KEYSTORE="$RUNNER_TEMP/android-smoke/test.keystore"
           export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
           # The CLI target overrides the production manifest's arm64-only target.
-          cargo apk build -p pt-app --lib --release --locked --target x86_64-linux-android
+          cargo apk build -p pt-app --lib --release --target x86_64-linux-android
           cp target/release/apk/powder-toy-next.apk "$RUNNER_TEMP/android-smoke/powder-smoke.apk"
       - name: Launch, render, background, resume, and relaunch
         uses: reactivecircus/android-emulator-runner@v2

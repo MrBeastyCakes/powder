@@ -140,6 +140,8 @@ struct Screen {
     egui_state: egui_winit::State,
     /// System bar insets in pixels, once Android has reported them.
     insets: Option<[u32; 2]>,
+    /// Logs each newly created Android surface reaching presentation.
+    presented: bool,
 }
 
 #[derive(Default)]
@@ -167,6 +169,8 @@ fn android_main(android_app: winit::platform::android::activity::AndroidApp) {
             .with_max_level(log::LevelFilter::Info)
             .with_tag("powder-toy"),
     );
+    std::panic::set_hook(Box::new(|panic| log::error!("fatal Rust panic: {panic}")));
+    log::info!("startup: Android entry point");
     let _ = ANDROID_APP.set(android_app.clone());
     let event_loop = EventLoop::builder()
         .with_android_app(android_app)
@@ -295,6 +299,7 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(430, 932));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let size = window.inner_size();
+        log::info!("startup: native window {} x {}", size.width, size.height);
 
         let instance = match &self.engine {
             Some(engine) => engine.gpu.instance.clone(),
@@ -308,6 +313,7 @@ impl ApplicationHandler for App {
             let egui_ctx = egui::Context::default();
             ui::install_fonts(&egui_ctx);
             let egui_renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
+            log::info!("startup: UI renderer ready");
             let sand = table.expect_id("sand");
             let settings = Settings {
                 mode: Mode::TwoD,
@@ -379,6 +385,7 @@ impl ApplicationHandler for App {
             config,
             egui_state,
             insets,
+            presented: false,
         });
     }
 
@@ -871,6 +878,10 @@ impl Engine {
         self.gpu.queue.submit(extra.into_iter().chain([encoder.finish()]));
         screen.window.pre_present_notify();
         self.gpu.queue.present(frame);
+        if !screen.presented {
+            screen.presented = true;
+            log::info!("startup: first frame presented");
+        }
         true
     }
 

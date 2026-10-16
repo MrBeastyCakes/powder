@@ -1,0 +1,68 @@
+name: Android startup smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  startup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-smoke-x86_64
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Build emulator APK
+        run: |
+          cargo install cargo-apk --locked
+          mkdir -p "$RUNNER_TEMP/android-smoke"
+          keytool -genkeypair -keystore "$RUNNER_TEMP/android-smoke/test.keystore" -storepass android \
+            -alias powder -keypass android -keyalg RSA -keysize 2048 -validity 2 \
+            -dname "CN=Powder startup smoke test"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_LATEST_HOME"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          export CARGO_APK_RELEASE_KEYSTORE="$RUNNER_TEMP/android-smoke/test.keystore"
+          export CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
+          # The CLI target overrides the production manifest's arm64-only target.
+          cargo apk build -p pt-app --lib --release --locked --target x86_64-linux-android
+          cp target/release/apk/powder-toy-next.apk "$RUNNER_TEMP/android-smoke/powder-smoke.apk"
+      - name: Launch, render, background, resume, and relaunch
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          emulator-boot-timeout: 180
+          emulator-options: -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -feature Vulkan -skin 540x960
+          script: bash mobile/android/smoke-test.sh "$RUNNER_TEMP/android-smoke/powder-smoke.apk" android-smoke-results
+      - name: Preserve startup diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-startup-diagnostics
+          path: android-smoke-results/
+          if-no-files-found: warn

@@ -43,7 +43,8 @@ struct BrushUniform {
     plane_y: f32,
     target: u32,
     extent: u32,
-    _p: [u32; 2],
+    thermal_scale: f32,
+    _p: u32,
 }
 
 /// Where a 3D brush stroke lands.
@@ -75,6 +76,7 @@ pub struct Sim3d {
     pub plane_y: f32,
     pub table: MaterialTable,
 
+    device: wgpu::Device,
     materials: wgpu::Buffer,
     cells: [wgpu::Buffer; 2],
     therm: [wgpu::Buffer; 2],
@@ -89,7 +91,7 @@ pub struct Sim3d {
     move_pipe: wgpu::ComputePipeline,
     pick_pipe: wgpu::ComputePipeline,
     paint_pipe: wgpu::ComputePipeline,
-    pending_stroke: Option<Stroke3>,
+    pending_stroke: Option<(Stroke3, f32)>,
 }
 
 fn entry(binding: u32, resource: wgpu::BindingResource<'_>) -> wgpu::BindGroupEntry<'_> {
@@ -223,6 +225,7 @@ impl Sim3d {
             pick_pipe: compute_pipeline(device, &paint_pl, &paint_module, "pick"),
             paint_pipe: compute_pipeline(device, &paint_pl, &paint_module, "paint"),
             table,
+            device: device.clone(),
             materials,
             cells,
             therm,
@@ -260,14 +263,24 @@ impl Sim3d {
         gpu.queue.write_buffer(&self.therm[self.current], 0, bytemuck::cast_slice(&therm));
     }
 
+    /// Queues a stroke with the legacy exposure of 1/60 simulated second.
     pub fn stroke(&mut self, stroke: Stroke3) {
-        self.pending_stroke = Some(stroke);
+        self.timed_stroke(stroke, 1.0 / 60.0);
     }
 
-    /// Records any pending stroke and `ticks` ticks. Call once per submit.
-    pub fn encode(&mut self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, ticks: u32) {
-        if let Some(stroke) = self.pending_stroke.take() {
-            self.encode_stroke(queue, encoder, stroke);
+    /// Queues a stroke with explicit thermal exposure in simulated seconds.
+    /// Construction ignores exposure; heat/cool apply 2400 legacy energy units
+    /// per second. Encode each stroke before queuing the next one.
+    pub fn timed_stroke(&mut self, stroke: Stroke3, duration_seconds: f32) {
+        assert!(duration_seconds.is_finite() && duration_seconds >= 0.0, "invalid stroke exposure");
+        self.pending_stroke = Some((stroke, duration_seconds));
+    }
+
+    /// Records any pending stroke and `ticks` ticks. Uniform snapshots preserve
+    /// command order when several encodes share one submit.
+    pub fn encode(&mut self, _queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, ticks: u32) {
+        if let Some((stroke, duration_seconds)) = self.pending_stroke.take() {
+            self.encode_stroke(encoder, stroke, duration_seconds);
         }
         if ticks == 0 {
             return;
@@ -294,7 +307,12 @@ impl Sim3d {
                 slot += 1;
             }
         }
-        queue.write_buffer(&self.params, 0, &slots);
+        let snapshot = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("immutable 3d tick parameters"),
+            contents: &slots,
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
+        encoder.copy_buffer_to_buffer(&snapshot, 0, &self.params, 0, slots.len() as u64);
 
         let [nx, ny, nz] = self.dims;
         let cells = [nx.div_ceil(4), ny.div_ceil(4), nz.div_ceil(4)];
@@ -322,7 +340,10 @@ impl Sim3d {
         self.tick = self.tick.wrapping_add(ticks);
     }
 
-    fn encode_stroke(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, s: Stroke3) {
+    fn encode_stroke(&self, encoder: &mut wgpu::CommandEncoder, s: Stroke3, duration_seconds: f32) {
+        if matches!(s.tool, Tool::Heat | Tool::Cool) && duration_seconds == 0.0 {
+            return;
+        }
         let (mode, mat) = s.tool.mode_and_material();
         let def = self.table.def(mat);
         let radius = s.radius.max(0.5);
@@ -345,9 +366,15 @@ impl Sim3d {
                 Target::Plane => 1,
             },
             extent,
-            _p: [0; 2],
+            thermal_scale: duration_seconds * 60.0,
+            _p: 0,
         };
-        queue.write_buffer(&self.brush, 0, bytemuck::bytes_of(&u));
+        let snapshot = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("immutable 3d stroke parameters"),
+            contents: bytemuck::bytes_of(&u),
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
+        encoder.copy_buffer_to_buffer(&snapshot, 0, &self.brush, 0, std::mem::size_of::<BrushUniform>() as u64);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("paint3d"),
             timestamp_writes: None,

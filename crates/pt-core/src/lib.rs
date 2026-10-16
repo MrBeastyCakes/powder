@@ -6,6 +6,7 @@
 //! - [`COMMON_WGSL`]: shader code both simulations include, so heat, phase
 //!   changes, reactions and colors behave the same in 2D and 3D.
 
+pub mod gas;
 pub mod gpu;
 pub mod materials;
 

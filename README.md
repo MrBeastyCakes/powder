@@ -28,6 +28,15 @@ for every later phase can be chosen from measurements and playtests.
   GPU with no locks. Denser material sinks through lighter material, faster
   the bigger the density difference; powders slide off piles unless friction
   holds them; liquids and gases spread sideways.
+- **Air and pressure (2D).** A coarse grid, one air cell per 4 x 4 world
+  cells, carries the air's flow. Each tick it weighs every column (hot air is
+  lighter), pushes sideways where neighbouring columns weigh differently, and
+  solves for the pressure that keeps the flow from piling up, so cold air
+  slides in under hot air and the hot air rises. Air and gases drift with the
+  flow. Liquids keep a sideways speed of their own, pushed by the weight of
+  the liquid above, so water jets out of a hole in its tank; to the air,
+  liquids are obstacles like a pile of sand. The Wind view shows the flow:
+  hue for direction, brightness for speed.
 - **Heat.** Energy-conserving diffusion with an enthalpy method: a cell at its
   melting point absorbs latent heat before it changes, so melting ice cools
   the water around it and boiling takes time. A test checks energy is
@@ -100,9 +109,11 @@ Next:
   passes per tick handle sinking through liquids, sliding and spreading.
   Sleeping chunks skip all of it where nothing moves: a 64 x 64 chunk sleeps
   until something nearby moves, is painted, or changes phase.
-- **Hot air does not rise yet.** Heat moves with cells and by conduction only,
-  so air heated by lava stays where it is. Buoyant hot air needs the Phase 1
-  air layer.
+- **First pass at air.** Hot air over lava rises, a tank jets through a hole,
+  and still or falling liquid leaves the air still (all tested). Water still drains from
+  a hole only as fast as air bubbles can climb into the tank, so jets are a
+  spray rather than a solid stream, and pressure does not yet shift boiling
+  or melting points.
 - **Software-GPU numbers are not phone numbers.** On the cloud machine's
   4-core software Vulkan device a 1080 x 2400 world takes about 90 ms per
   tick. The on-device benchmark exists to get real numbers.

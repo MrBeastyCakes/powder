@@ -19,6 +19,16 @@
 // to a marked one (a cell moves far less than a chunk in one tick), and
 // `reset` clears the marks. Movement passes skip blocks in sleeping chunks,
 // so a settled world costs only its heat pass.
+//
+// Wind: the air grid (air2d.wgsl) gives a flow velocity everywhere. Each
+// block pass first lets air and gases drift along it, with a chance per pass
+// that averages out to the flow's speed. Powders drift sideways a little.
+//
+// Liquids carry their own sideways speed in bits 24 to 31 (signed, eighths of
+// a cell per tick). The weight of the liquid above pushes them sideways from
+// deep columns toward shallow ones, so water pours out of a hole in its tank
+// and keeps going as a jet; resting on something slows them. They do not ride
+// the air grid's flow: to the air, liquid is an obstacle like a pile of sand.
 
 struct Params {
     width: u32,
@@ -28,7 +38,7 @@ struct Params {
     offset: u32,
     salt: u32,
     heat_speed: f32,
-    _pad: u32,
+    substeps: u32,
 }
 
 @group(0) @binding(1) var<uniform> params: Params;
@@ -38,6 +48,8 @@ struct Params {
 @group(0) @binding(5) var<storage, read_write> therm_out: array<vec2<f32>>;
 @group(0) @binding(6) var<storage, read_write> moved: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read_write> awake: array<u32>;
+// Face velocities from air2d.wgsl, in air cells per tick: U then V.
+@group(0) @binding(8) var<storage, read> air: array<f32>;
 
 const CHUNK: u32 = 64u;
 // Velocity units are eighths of a cell per tick.
@@ -46,6 +58,57 @@ const MAX_FALL: u32 = 160u;
 
 fn vel_of(cell: u32) -> u32 { return (cell >> 16u) & 0xffu; }
 fn with_vel(cell: u32, v: u32) -> u32 { return (cell & 0xff00ffffu) | (v << 16u); }
+fn hvel_of(cell: u32) -> i32 { return bitcast<i32>(cell) >> 24u; }
+fn with_hvel(cell: u32, h: i32) -> u32 { return (cell & 0x00ffffffu) | (u32(h & 0xff) << 24u); }
+
+const AIR_CELL: u32 = 4u;
+// How readily wind moves powders, compared with fluids.
+const POWDER_DRAG: f32 = 0.1;
+// Sideways speed kept per tick by a liquid resting on something, in eighths.
+const LIQUID_FRICTION: i32 = 7;
+
+// Column weight at an air cell (PH in air2d.wgsl), or `fallback` off the
+// grid or in a solid.
+fn pressure_at(i: i32, j: i32, fallback: f32) -> f32 {
+    let aw = (params.width + AIR_CELL - 1u) / AIR_CELL;
+    let ah = (params.height + AIR_CELL - 1u) / AIR_CELL;
+    if (i < 0 || j < 0 || i >= i32(aw) || j >= i32(ah)) { return fallback; }
+    let rho = 2u * ((aw + 1u) * ah + aw * (ah + 1u)) + u32(j) * aw + u32(i);
+    if (air[rho] < 0.0) { return fallback; }
+    return air[rho + aw * ah];
+}
+
+// A liquid's new sideways speed: pushed down the pressure slope, slowed when
+// resting on something.
+fn liquid_hvel(cell: u32, x: u32, y: u32, resting: bool) -> i32 {
+    let i = i32(x / AIR_CELL);
+    let j = i32(y / AIR_CELL);
+    let pc = pressure_at(i, j, 0.0);
+    let grad = 0.5 * (pressure_at(i + 1, j, pc) - pressure_at(i - 1, j, pc));
+    // Air cells per tick per tick, to eighths of a world cell.
+    let push = -grad / materials.m[mat_of(cell)].density * f32(AIR_CELL) * 8.0;
+    var h = f32(hvel_of(cell)) + push;
+    if (resting) { h = h * f32(LIQUID_FRICTION) / 8.0; }
+    // Round toward zero so a resting liquid comes to a stop.
+    return clamp(i32(trunc(h)), -127, 127);
+}
+
+// Flow velocity at a world position, in world cells per tick.
+fn wind_at(x: f32, y: f32) -> vec2<f32> {
+    let aw = (params.width + AIR_CELL - 1u) / AIR_CELL;
+    let ah = (params.height + AIR_CELL - 1u) / AIR_CELL;
+    let i = min(u32(x) / AIR_CELL, aw - 1u);
+    let j = min(u32(y) / AIR_CELL, ah - 1u);
+    let fx = fract(x / f32(AIR_CELL));
+    let fy = fract(y / f32(AIR_CELL));
+    // Interpolate between the cell's two faces along each axis.
+    let u = mix(air[j * (aw + 1u) + i], air[j * (aw + 1u) + i + 1u], fx);
+    let nu = (aw + 1u) * ah;
+    let v = mix(air[nu + j * aw + i], air[nu + (j + 1u) * aw + i], fy);
+    return vec2<f32>(u, v) * f32(AIR_CELL);
+}
+
+fn open_kind(k: u32) -> bool { return k == KIND_EMPTY || k == KIND_GAS; }
 
 fn idx(x: u32, y: u32) -> u32 { return y * params.width + x; }
 
@@ -71,6 +134,7 @@ fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var flux = 0.0;
     var touches_air = false;
+    var resting = gid.y + 1u >= params.height;
     var dirs = array<vec2<i32>, 4>(vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i32>(0, 1), vec2<i32>(0, -1));
     for (var d = 0u; d < 4u; d++) {
         let p = vec2<i32>(gid.xy) + dirs[d];
@@ -80,13 +144,18 @@ fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
         let n = mat_of(cells_in[j]);
         flux += conductance(mat, n, 0.24, params.heat_speed) * (therm_in[j].x - th.x);
         touches_air = touches_air || kind_of(n) == KIND_EMPTY || kind_of(n) == KIND_GAS;
+        if (d == 2u) { resting = !open_kind(kind_of(n)); }
     }
 
     var s = CellState(mat, th.x + flux / materials.m[mat].heat_capacity, th.y);
     s = resolve_phase(s);
     s = react(s, touches_air, hash3(i, params.tick, params.seed));
     // A cell that changes material starts at rest; otherwise it keeps its speed.
-    cells_out[i] = select(make_cell(s.mat, shade_of(cell)), with_vel(make_cell(s.mat, shade_of(cell)), vel_of(cell)), s.mat == mat);
+    var out = select(make_cell(s.mat, shade_of(cell)), cell, s.mat == mat);
+    if (kind_of(s.mat) == KIND_LIQUID) {
+        out = with_hvel(out, liquid_hvel(out, gid.x, gid.y, resting));
+    }
+    cells_out[i] = out;
     therm_out[i] = vec2<f32>(s.temp, s.latent);
     // A phase change or reaction can set still material moving (ice melts).
     if (s.mat != mat) {
@@ -179,6 +248,8 @@ var<private> blk_cell: array<u32, 4>;
 var<private> blk_therm: array<vec2<f32>, 4>;
 var<private> blk_mat: array<u32, 4>;
 var<private> blk_moved: array<bool, 4>;
+// Changed in place without moving; needs writing back.
+var<private> blk_dirty: array<bool, 4>;
 
 fn swap_cells(a: u32, b: u32) {
     let c = blk_cell[a]; blk_cell[a] = blk_cell[b]; blk_cell[b] = c;
@@ -218,6 +289,7 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
         let x = bx + i32(k & 1u);
         let y = by + i32(k >> 1u);
         blk_moved[k] = false;
+        blk_dirty[k] = false;
         if (x >= 0 && y >= 0 && x < i32(params.width) && y < i32(params.height)) {
             let i = idx(u32(x), u32(y));
             valid[k] = true;
@@ -236,6 +308,55 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
     let l = h & 1u;
     let r = 1u - l;
     let cols = array<u32, 2>(l, r);
+
+    // 0. Wind: drift with the air flow.
+    let wind = wind_at(f32(bx) + 1.0, f32(by) + 1.0) / f32(max(params.substeps, 1u));
+    if (abs(wind.x) > 0.001) {
+        for (var row = 0u; row < 4u; row += 2u) {
+            let src = select(row + 1u, row, wind.x > 0.0);
+            let dst = select(row, row + 1u, wind.x > 0.0);
+            let ks = kind_of(blk_mat[src]);
+            let drag = select(1.0, POWDER_DRAG, ks == KIND_POWDER);
+            if (ks != KIND_SOLID && ks != KIND_LIQUID && open_kind(kind_of(blk_mat[dst]))
+                && rand01(pcg(h ^ (0x3a1du + row))) < abs(wind.x) * drag) {
+                swap_cells(src, dst);
+                busy = busy || blk_mat[src] != blk_mat[dst];
+            }
+        }
+    }
+    // Liquids move sideways at their own speed.
+    for (var row = 0u; row < 4u; row += 2u) {
+        for (var side = 0u; side < 2u; side++) {
+            let src = row + side;
+            let dst = row + 1u - side;
+            if (blk_moved[src] || kind_of(blk_mat[src]) != KIND_LIQUID) { continue; }
+            let hv = hvel_of(blk_cell[src]);
+            // Only toward the other cell: rightward from the left one.
+            if (hv == 0 || (hv > 0) != (side == 0u)) { continue; }
+            if (open_kind(kind_of(blk_mat[dst])) && !blk_moved[dst]) {
+                busy = true;
+                if (rand01(pcg(h ^ (0x41c5u + src))) * 8.0 * f32(max(params.substeps, 1u)) < f32(abs(hv))) {
+                    swap_cells(src, dst);
+                }
+            } else if (kind_of(blk_mat[dst]) != KIND_LIQUID) {
+                // Blocked by a wall or a pile: the push is spent. Behind more
+                // liquid it keeps it, so a stream stays a stream.
+                blk_cell[src] = with_hvel(blk_cell[src], 0);
+                blk_dirty[src] = true;
+            }
+        }
+    }
+    if (abs(wind.y) > 0.001) {
+        for (var col = 0u; col < 2u; col++) {
+            let src = select(col + 2u, col, wind.y > 0.0);
+            let dst = select(col, col + 2u, wind.y > 0.0);
+            if (!blk_moved[src] && !blk_moved[dst] && open_kind(kind_of(blk_mat[src])) && open_kind(kind_of(blk_mat[dst]))
+                && rand01(pcg(h ^ (0x7c3bu + col))) < abs(wind.y)) {
+                swap_cells(src, dst);
+                busy = busy || blk_mat[src] != blk_mat[dst];
+            }
+        }
+    }
 
     // 1. Sink: anything denser sinks through liquid or gas below it, faster the
     //    bigger the density difference (sand drops through water, stone sinks
@@ -294,7 +415,7 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     for (var k = 0u; k < 4u; k++) {
-        if (valid[k] && blk_moved[k]) {
+        if (valid[k] && (blk_moved[k] || blk_dirty[k])) {
             let i = idx(u32(bx + i32(k & 1u)), u32(by + i32(k >> 1u)));
             cells_out[i] = blk_cell[k];
             therm_out[i] = blk_therm[k];

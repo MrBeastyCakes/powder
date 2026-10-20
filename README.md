@@ -34,8 +34,9 @@ for every later phase can be chosen from measurements and playtests.
   solves for the pressure that keeps the flow from piling up, so cold air
   slides in under hot air and the hot air rises. Air and gases drift with the
   flow. Liquids keep a sideways speed of their own, pushed by the weight of
-  the liquid above, so water jets out of a hole in its tank. The Wind view
-  shows the flow: hue for direction, brightness for speed.
+  the liquid above, so water jets out of a hole in its tank; to the air,
+  liquids are obstacles like a pile of sand. The Wind view shows the flow:
+  hue for direction, brightness for speed.
 - **Heat.** Energy-conserving diffusion with an enthalpy method: a cell at its
   melting point absorbs latent heat before it changes, so melting ice cools
   the water around it and boiling takes time. A test checks energy is
@@ -109,7 +110,7 @@ Next:
   Sleeping chunks skip all of it where nothing moves: a 64 x 64 chunk sleeps
   until something nearby moves, is painted, or changes phase.
 - **First pass at air.** Hot air over lava rises, a tank jets through a hole,
-  and still water leaves the air still (all tested). Water still drains from
+  and still or falling liquid leaves the air still (all tested). Water still drains from
   a hole only as fast as air bubbles can climb into the tank, so jets are a
   spray rather than a solid stream, and pressure does not yet shift boiling
   or melting points.

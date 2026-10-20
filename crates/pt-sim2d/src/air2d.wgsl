@@ -4,13 +4,22 @@
 // of each air cell, vertical velocity on the top and bottom faces, pressure at
 // the centre. Velocity is in air cells per tick. Each tick:
 //
-//  1. `gather` sums up the world cells under each air cell: its mean density
-//     (gases and air get lighter as they heat up), or solid when at least half
-//     of it is solid or powder.
+//  1. `gather` sums up the world cells under each air cell, twice. For the
+//     air it takes the mean density of the air and gases (lighter as they heat
+//     up), or marks the cell blocked when at least half of it is solid, powder
+//     or liquid: liquids move by their own rules, so to the air they are
+//     obstacles like a pile of sand. For liquids it takes the mean density of
+//     everything that flows, or solid when at least half is solid or powder.
 //  2. `hydro` integrates the weight of each column from the top down, relative
-//     to room-temperature air. That pressure exactly holds every column up, so
-//     only differences between neighbouring columns push sideways: water pushes
-//     out through a hole in its tank, and cold air pushes in under hot air.
+//     to room-temperature air, once for each. That pressure exactly holds every
+//     column up, so only differences between neighbouring columns push
+//     sideways: cold air pushes in under hot air, and water pushes out through
+//     a hole in its tank (sim2d.wgsl reads the liquid one).
+//
+//     Keeping liquid out of the air's weight matters: a blob of oil weighs
+//     hundreds of times what the air beside it does, so counted in, it pushed
+//     the air under it sideways hard enough that the pressure solve could not
+//     cancel it, and any poured liquid raised a gale.
 //  3. `advect` carries velocity along itself and adds that sideways push.
 //  4. `divergence` and a few `jacobi` iterations find the pressure that keeps
 //     the flow from piling up or emptying out, warm-started from last tick.
@@ -20,9 +29,11 @@
 // The movement passes then let gases, air and liquids drift with the flow.
 //
 // Buffer `air` holds, in order: U and V (final face velocities, read by the
-// movement passes), U2 and V2 (before the pressure solve), RHO (density, or
-// SOLID), PH (column weight, which also pushes liquids: see `heat` in
-// sim2d.wgsl) and DIV.
+// movement passes), U2 and V2 (before the pressure solve), then per air cell
+// RHO (density of everything that flows, or SOLID), PH (its column weight,
+// which pushes liquids: see `heat` in sim2d.wgsl), DIV, ARHO (density of the
+// air and gases, or SOLID where the air is blocked) and PA (their column
+// weight, which pushes the air).
 
 struct AirParams {
     width: u32,
@@ -48,10 +59,6 @@ const ROOM_K: f32 = 293.15;
 const SOLID: f32 = -1.0;
 const MAX_SPEED: f32 = 2.0;
 const DAMPING: f32 = 0.99;
-// Flow through liquid dies out quickly: liquids move by their own speed (see
-// sim2d.wgsl) and only take their pressure from this grid.
-const LIQUID_DAMPING: f32 = 0.5;
-const LIQUID_RHO: f32 = 500.0;
 // Flow slower than this leaves a sleeping chunk asleep.
 const WAKE_SPEED: f32 = 0.02;
 const CHUNK: u32 = 64u;
@@ -65,13 +72,12 @@ fn u2_base() -> u32 { return nu() + nv(); }
 fn rho_at(i: u32, j: u32) -> u32 { return 2u * (nu() + nv()) + j * ap.aw + i; }
 fn ph_at(i: u32, j: u32) -> u32 { return rho_at(i, j) + nc(); }
 fn div_at(i: u32, j: u32) -> u32 { return rho_at(i, j) + 2u * nc(); }
+fn arho_at(i: u32, j: u32) -> u32 { return rho_at(i, j) + 3u * nc(); }
+fn pa_at(i: u32, j: u32) -> u32 { return rho_at(i, j) + 4u * nc(); }
 fn cell_at(i: u32, j: u32) -> u32 { return j * ap.aw + i; }
 
-fn rho(i: u32, j: u32) -> f32 { return air[rho_at(i, j)]; }
-
-fn damping(r: f32) -> f32 {
-    return mix(DAMPING, LIQUID_DAMPING, clamp(r / LIQUID_RHO, 0.0, 1.0));
-}
+// The air's density at an air cell, or SOLID where the air is blocked.
+fn rho(i: u32, j: u32) -> f32 { return air[arho_at(i, j)]; }
 
 fn wake_at(x: u32, y: u32) {
     let cw = (ap.width + CHUNK - 1u) / CHUNK;
@@ -85,8 +91,11 @@ fn wake_at(x: u32, y: u32) {
 fn gather(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= ap.aw || gid.y >= ap.ah) { return; }
     var solid = 0u;
+    var liquid = 0u;
     var mass = 0.0;
     var n = 0.0;
+    var gas_mass = 0.0;
+    var gas_n = 0.0;
     for (var dy = 0u; dy < AIR_CELL; dy++) {
         for (var dx = 0u; dx < AIR_CELL; dx++) {
             let x = gid.x * AIR_CELL + dx;
@@ -98,37 +107,51 @@ fn gather(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Piles of powder block the air like walls do.
             if (k == KIND_SOLID || k == KIND_POWDER) { solid++; continue; }
             var r = materials.m[m].density;
-            if (k == KIND_EMPTY || k == KIND_GAS) {
+            if (k == KIND_LIQUID) {
+                liquid++;
+            } else {
                 r *= ROOM_K / max(therm[i].x + 273.15, 1.0);
+                gas_mass += r;
+                gas_n += 1.0;
             }
             mass += r;
             n += 1.0;
         }
     }
-    air[rho_at(gid.x, gid.y)] = select(mass / max(n, 1.0), SOLID, solid * 2u >= AIR_CELL * AIR_CELL);
+    let half = AIR_CELL * AIR_CELL;
+    air[rho_at(gid.x, gid.y)] = select(mass / max(n, 1.0), SOLID, solid * 2u >= half);
+    air[arho_at(gid.x, gid.y)] = select(gas_mass / max(gas_n, 1.0), SOLID, (solid + liquid) * 2u >= half);
+}
+
+// Integrates column `i` of the densities at `src` (offset per air cell)
+// into column weights at `dst`.
+fn column_weight(i: u32, src: u32, dst: u32) {
+    var p = 0.0;
+    var prev = 0.0;
+    var open = false;
+    for (var j = 0u; j < ap.ah; j++) {
+        let c = j * ap.aw + i;
+        let r = air[src + c];
+        if (r < 0.0) {
+            // Solids carry their own weight; pressure starts over below them.
+            air[dst + c] = 0.0;
+            open = false;
+            continue;
+        }
+        let rp = r - AIR_REF;
+        p = select(AIR_GRAVITY * rp * 0.5, p + AIR_GRAVITY * (prev + rp) * 0.5, open);
+        air[dst + c] = p;
+        prev = rp;
+        open = true;
+    }
 }
 
 @compute @workgroup_size(64)
 fn hydro(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     if (i >= ap.aw) { return; }
-    var p = 0.0;
-    var prev = 0.0;
-    var open = false;
-    for (var j = 0u; j < ap.ah; j++) {
-        let r = rho(i, j);
-        if (r < 0.0) {
-            // Solids carry their own weight; pressure starts over below them.
-            air[ph_at(i, j)] = 0.0;
-            open = false;
-            continue;
-        }
-        let rp = r - AIR_REF;
-        p = select(AIR_GRAVITY * rp * 0.5, p + AIR_GRAVITY * (prev + rp) * 0.5, open);
-        air[ph_at(i, j)] = p;
-        prev = rp;
-        open = true;
-    }
+    column_weight(i, rho_at(0u, 0u), ph_at(0u, 0u));
+    column_weight(i, arho_at(0u, 0u), pa_at(0u, 0u));
 }
 
 fn sample_u(pos: vec2<f32>) -> f32 {
@@ -174,8 +197,8 @@ fn advect(@builtin(global_invocation_id) gid: vec3<u32>) {
             let back = pos - vec2<f32>(air[u_at(i, j)], sample_v(pos));
             // The sideways push from columns of different weight.
             let w = 2.0 / (rho(i - 1u, j) + rho(i, j));
-            u = damping(2.0 / w) * sample_u(back);
-            u -= w * (air[ph_at(i, j)] - air[ph_at(i - 1u, j)]);
+            u = DAMPING * sample_u(back);
+            u -= w * (air[pa_at(i, j)] - air[pa_at(i - 1u, j)]);
         }
         air[base + u_at(i, j)] = u;
     }
@@ -185,7 +208,7 @@ fn advect(@builtin(global_invocation_id) gid: vec3<u32>) {
             let pos = vec2<f32>(f32(i) + 0.5, f32(j));
             let back = pos - vec2<f32>(sample_u(pos), air[v_at(i, j)]);
             // Gravity and the column weight cancel exactly here.
-            v = damping(0.5 * (rho(i, j - 1u) + rho(i, j))) * sample_v(back);
+            v = DAMPING * sample_v(back);
         }
         air[base + v_at(i, j)] = v;
     }

@@ -598,10 +598,11 @@ struct AirPipes {
 }
 
 /// Floats in the `air` buffer for an `aw` x `ah` air grid: U, V, U2, V2, then
-/// density, column weight and divergence per air cell.
+/// per air cell the density and column weight of everything that flows,
+/// divergence, and the density and column weight of the air alone.
 fn air_len(aw: u32, ah: u32) -> u64 {
     let faces = ((aw + 1) * ah + aw * (ah + 1)) as u64;
-    2 * faces + 3 * (aw * ah) as u64
+    2 * faces + 5 * (aw * ah) as u64
 }
 
 fn entry(binding: u32, resource: wgpu::BindingResource<'_>) -> wgpu::BindGroupEntry<'_> {

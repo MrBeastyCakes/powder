@@ -28,9 +28,7 @@
 // a cell per tick). The weight of the liquid above pushes them sideways from
 // deep columns toward shallow ones, so water pours out of a hole in its tank
 // and keeps going as a jet; resting on something slows them. They do not ride
-// the air grid's flow, which mixes the air's flow with theirs. Nor do they feel
-// the solved part of the air pressure: liquid barely moves on the air grid, so
-// that part only balances the column weight where liquid is held in.
+// the air grid's flow: to the air, liquid is an obstacle like a pile of sand.
 
 struct Params {
     width: u32,

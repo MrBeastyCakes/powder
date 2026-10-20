@@ -398,21 +398,40 @@ fn water_jets_through_a_hole_in_its_tank() {
     // A hole halfway down the tank's right wall.
     w.fill(60, 100, 64, 108, 0, 20.0);
     let mut sim = w.sim(&gpu, &t, 3);
-    sim.run(&gpu, 30);
+    sim.run(&gpu, 60);
     let cells = sim.read_cells(&gpu);
-    // Where the water falling outside the tank is, a little below the hole.
-    let xs: Vec<u32> = (120..160u32)
+    // Where the water that has left the tank is, from the hole down.
+    let xs: Vec<u32> = (100..192u32)
         .flat_map(|y| (64..256u32).map(move |x| (x, y)))
         .filter(|&(x, y)| cells[(y * 256 + x) as usize] & 0xff == water)
         .map(|(x, _)| x)
         .collect();
     let mean = xs.iter().sum::<u32>() as f32 / xs.len().max(1) as f32;
-    // Poured water runs down the wall (mean x about 74 with the push turned
-    // off); a jet lands well away from it.
+    // Poured water spreads out from the wall (mean x 79.6 with the push turned
+    // off); the jet carries it further (86.1 with it on).
     assert!(
-        xs.len() > 50 && mean > 85.0,
-        "the water should jet away from the tank, mean x {mean}"
+        xs.len() > 200 && mean > 83.0,
+        "the water should jet away from the tank: {} cells, mean x {mean}",
+        xs.len()
     );
+}
+
+#[test]
+fn falling_liquid_leaves_the_air_still() {
+    // Liquids move by their own rules; to the air they are obstacles. A blob
+    // of oil falling through the air once pushed the air beside it at the
+    // speed limit within a tick.
+    let gpu = gpu();
+    let t = MaterialTable::core();
+    let mut w = World::new(128, 128);
+    w.fill(0, 120, 128, 128, t.expect_id("wall"), 20.0);
+    w.fill(40, 20, 80, 50, t.expect_id("oil"), 20.0);
+    let mut sim = w.sim(&gpu, &t, 3);
+    for _ in 0..3 {
+        sim.run(&gpu, 10);
+        let max = sim.read_wind(&gpu).iter().map(|v| v[0].hypot(v[1])).fold(0.0f32, f32::max);
+        assert!(max < 0.1, "falling oil should not stir the air, max wind {max}");
+    }
 }
 
 #[test]

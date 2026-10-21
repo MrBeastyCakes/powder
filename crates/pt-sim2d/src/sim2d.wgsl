@@ -101,7 +101,7 @@ fn liquid_hvel(cell: u32, x: u32, y: u32, keep: f32, h: u32) -> i32 {
     // next. Right at the surface there is too little liquid above to show it,
     // and surface cells are the only ones free to move, so also look one air
     // cell down and take the stronger of the two.
-    let grad = slope_at(i, j);
+    let grad = stronger(slope_at(i, j), slope_at(i, j + 1));
     // Air cells per tick per tick, to eighths of a world cell.
     let push = -grad / materials.m[mat_of(cell)].density * f32(AIR_CELL) * 8.0;
     let v = (f32(hvel_of(cell)) + push) * keep;

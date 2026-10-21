@@ -446,3 +446,27 @@ fn still_water_leaves_the_air_still() {
     let max = sim.read_wind(&gpu).iter().map(|v| v[0].hypot(v[1])).fold(0.0f32, f32::max);
     assert!(max < 0.1, "a tank of still water should not stir the air, max wind {max}");
 }
+
+#[test]
+fn a_column_of_water_settles_flat_quickly() {
+    // A 64-cell column of water collapses across a 256-wide box. Before
+    // liquids rode their own sideways speed it was still 19 cells from flat
+    // after 240 ticks (4 s) and took 960 to get within 2.
+    let gpu = gpu();
+    let t = MaterialTable::core();
+    let wall = t.expect_id("wall");
+    let water = t.expect_id("water");
+    let (w, h) = (260u32, 128u32);
+    let mut world = World::new(w, h);
+    world.fill(0, 0, 2, h, wall, 20.0);
+    world.fill(w - 2, 0, w, h, wall, 20.0);
+    world.fill(98, h - 64, 162, h, water, 20.0);
+    let mut sim = world.sim(&gpu, &t, 3);
+    sim.run(&gpu, 240);
+    let cells = sim.read_cells(&gpu);
+    let depths: Vec<u32> = (2..w - 2)
+        .map(|x| (0..h).find(|&y| cells[(y * w + x) as usize] & 0xff == water).map_or(0, |y| h - y))
+        .collect();
+    let (lo, hi) = (depths.iter().min().unwrap(), depths.iter().max().unwrap());
+    assert!(hi - lo <= 2, "the water should be flat after 4 s, depths {lo} to {hi}");
+}

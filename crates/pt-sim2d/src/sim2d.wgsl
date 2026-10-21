@@ -64,8 +64,12 @@ fn with_hvel(cell: u32, h: i32) -> u32 { return (cell & 0x00ffffffu) | (u32(h & 
 const AIR_CELL: u32 = 4u;
 // How readily wind moves powders, compared with fluids.
 const POWDER_DRAG: f32 = 0.1;
-// Sideways speed kept per tick by a liquid resting on something, in eighths.
-const LIQUID_FRICTION: i32 = 7;
+// Share of its sideways speed a liquid keeps per tick: resting on the ground,
+// and resting on more liquid (much less drag, so the top layer of a puddle can
+// carry it flat, but enough that a speed blocked by the liquid beside it dies
+// away instead of keeping the puddle awake).
+const KEEP_ON_GROUND: f32 = 0.875;
+const KEEP_ON_LIQUID: f32 = 0.9375;
 
 // Column weight at an air cell (PH in air2d.wgsl), or `fallback` off the
 // grid or in a solid.
@@ -78,19 +82,35 @@ fn pressure_at(i: i32, j: i32, fallback: f32) -> f32 {
     return air[rho + aw * ah];
 }
 
-// A liquid's new sideways speed: pushed down the pressure slope, slowed when
-// resting on something.
-fn liquid_hvel(cell: u32, x: u32, y: u32, resting: bool) -> i32 {
+// The sideways slope of the column weight at an air cell, or 0 in a solid.
+fn slope_at(i: i32, j: i32) -> f32 {
+    let pc = pressure_at(i, j, 0.0);
+    if (pc == 0.0) { return 0.0; }
+    return 0.5 * (pressure_at(i + 1, j, pc) - pressure_at(i - 1, j, pc));
+}
+
+fn stronger(a: f32, b: f32) -> f32 { return select(a, b, abs(b) > abs(a)); }
+
+// A liquid's new sideways speed: pushed down the pressure slope, then keeping
+// `keep` of it. `h` is a hash for rounding.
+fn liquid_hvel(cell: u32, x: u32, y: u32, keep: f32, h: u32) -> i32 {
     let i = i32(x / AIR_CELL);
     let j = i32(y / AIR_CELL);
-    let pc = pressure_at(i, j, 0.0);
-    let grad = 0.5 * (pressure_at(i + 1, j, pc) - pressure_at(i - 1, j, pc));
+    // Under a still surface the sideways pressure difference is the same at
+    // every depth, set by how much higher one column's surface is than the
+    // next. Right at the surface there is too little liquid above to show it,
+    // and surface cells are the only ones free to move, so also look one air
+    // cell down and take the stronger of the two.
+    let grad = stronger(slope_at(i, j), slope_at(i, j + 1));
     // Air cells per tick per tick, to eighths of a world cell.
     let push = -grad / materials.m[mat_of(cell)].density * f32(AIR_CELL) * 8.0;
-    var h = f32(hvel_of(cell)) + push;
-    if (resting) { h = h * f32(LIQUID_FRICTION) / 8.0; }
-    // Round toward zero so a resting liquid comes to a stop.
-    return clamp(i32(trunc(h)), -127, 127);
+    let v = (f32(hvel_of(cell)) + push) * keep;
+    // Round at random, up with the chance of the fraction, so the speed is
+    // right on average. Rounding toward zero lost every push under an eighth,
+    // so once a puddle's slope fell below about 1 in 3 nothing drove it flat
+    // but random spreading, which took the best part of a minute. A flat
+    // surface has no push, so a resting liquid still comes to a stop.
+    return clamp(i32(floor(v + rand01(h))), -127, 127);
 }
 
 // Flow velocity at a world position, in world cells per tick.
@@ -106,6 +126,12 @@ fn wind_at(x: f32, y: f32) -> vec2<f32> {
     let nu = (aw + 1u) * ah;
     let v = mix(air[nu + j * aw + i], air[nu + (j + 1u) * aw + i], fy);
     return vec2<f32>(u, v) * f32(AIR_CELL);
+}
+
+// A liquid moving sideways at its own speed, the other way from `rightward`.
+fn against_hvel(cell: u32, mat: u32, rightward: bool) -> bool {
+    let hv = hvel_of(cell);
+    return kind_of(mat) == KIND_LIQUID && hv != 0 && (hv > 0) != rightward;
 }
 
 fn open_kind(k: u32) -> bool { return k == KIND_EMPTY || k == KIND_GAS; }
@@ -134,7 +160,8 @@ fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var flux = 0.0;
     var touches_air = false;
-    var resting = gid.y + 1u >= params.height;
+    // What the cell rests on slows its sideways speed (see liquid_hvel).
+    var keep = select(1.0, KEEP_ON_GROUND, gid.y + 1u >= params.height);
     var dirs = array<vec2<i32>, 4>(vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i32>(0, 1), vec2<i32>(0, -1));
     for (var d = 0u; d < 4u; d++) {
         let p = vec2<i32>(gid.xy) + dirs[d];
@@ -144,7 +171,9 @@ fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
         let n = mat_of(cells_in[j]);
         flux += conductance(mat, n, 0.24, params.heat_speed) * (therm_in[j].x - th.x);
         touches_air = touches_air || kind_of(n) == KIND_EMPTY || kind_of(n) == KIND_GAS;
-        if (d == 2u) { resting = !open_kind(kind_of(n)); }
+        if (d == 2u && !open_kind(kind_of(n))) {
+            keep = select(KEEP_ON_GROUND, KEEP_ON_LIQUID, kind_of(n) == KIND_LIQUID);
+        }
     }
 
     var s = CellState(mat, th.x + flux / materials.m[mat].heat_capacity, th.y);
@@ -153,7 +182,7 @@ fn heat(@builtin(global_invocation_id) gid: vec3<u32>) {
     // A cell that changes material starts at rest; otherwise it keeps its speed.
     var out = select(make_cell(s.mat, shade_of(cell)), cell, s.mat == mat);
     if (kind_of(s.mat) == KIND_LIQUID) {
-        out = with_hvel(out, liquid_hvel(out, gid.x, gid.y, resting));
+        out = with_hvel(out, liquid_hvel(out, gid.x, gid.y, keep, hash3(i ^ 0x68e31da4u, params.tick, params.seed)));
     }
     cells_out[i] = out;
     therm_out[i] = vec2<f32>(s.temp, s.latent);
@@ -399,13 +428,17 @@ fn move_blocks(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // 3. Spread: liquids and gases flow sideways into open space.
+    // 3. Spread: liquids and gases flow sideways into open space, but not
+    //    against a liquid's own sideways speed: spreading at random undid that
+    //    speed, and a puddle took several times as long to settle flat.
     for (var row = 0u; row < 4u; row += 2u) {
         let a = l + row;
         let b = r + row;
         let flows = flows_sideways(blk_mat[a], blk_mat[b]);
         busy = busy || flows;
-        if (!blk_moved[a] && !blk_moved[b] && flows) {
+        // Slot a is the left one when `l` is 0; a liquid in a would move right.
+        let steered = against_hvel(blk_cell[a], blk_mat[a], l == 0u) || against_hvel(blk_cell[b], blk_mat[b], l != 0u);
+        if (!blk_moved[a] && !blk_moved[b] && flows && !steered) {
             let sa = select(0.0, materials.m[blk_mat[a]].spread, blk_mat[a] < 128u);
             let sb = select(0.0, materials.m[blk_mat[b]].spread, blk_mat[b] < 128u);
             if (rand01(pcg(h ^ (0x51edu + row))) < max(sa, sb)) {
